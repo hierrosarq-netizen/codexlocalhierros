@@ -59,6 +59,19 @@ impl App {
         });
     }
 
+    pub(super) fn track_product_analytics_event(
+        &mut self,
+        app_server: &AppServerSession,
+        event: ProductAnalyticsEvent,
+    ) {
+        let request_handle = app_server.request_handle();
+        tokio::spawn(async move {
+            if let Err(err) = track_product_analytics_event(request_handle, event).await {
+                tracing::warn!("failed to track product analytics event: {err:#}");
+            }
+        });
+    }
+
     /// Starts the initial skills refresh without delaying the first interactive frame.
     ///
     /// Startup only needs skill metadata to populate skill mentions and the skills UI; the prompt can be
@@ -449,6 +462,22 @@ pub(super) async fn send_add_credits_nudge_email(
         .wrap_err("account/sendAddCreditsNudgeEmail failed in TUI")?;
 
     Ok(response.status)
+}
+
+pub(super) async fn track_product_analytics_event(
+    request_handle: AppServerRequestHandle,
+    event: ProductAnalyticsEvent,
+) -> Result<()> {
+    let request_id = RequestId::String(format!("product-analytics-event-{}", Uuid::new_v4()));
+    let _: TrackProductAnalyticsEventResponse = request_handle
+        .request_typed(ClientRequest::TrackProductAnalyticsEvent {
+            request_id,
+            params: TrackProductAnalyticsEventParams { event },
+        })
+        .await
+        .wrap_err("analytics/productEvent/track failed in TUI")?;
+
+    Ok(())
 }
 
 pub(super) async fn fetch_skills_list(

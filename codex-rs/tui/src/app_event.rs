@@ -20,6 +20,7 @@ use codex_app_server_protocol::PluginListResponse;
 use codex_app_server_protocol::PluginReadParams;
 use codex_app_server_protocol::PluginReadResponse;
 use codex_app_server_protocol::PluginUninstallResponse;
+use codex_app_server_protocol::ProductAnalyticsEvent;
 use codex_app_server_protocol::SkillsListResponse;
 use codex_app_server_protocol::ThreadGoalStatus;
 use codex_file_search::FileMatch;
@@ -232,6 +233,11 @@ pub(crate) enum AppEvent {
     /// Send a user-confirmed request to notify the workspace owner.
     SendAddCreditsNudgeEmail {
         credit_type: AddCreditsNudgeCreditType,
+    },
+
+    /// Track a client-side product analytics event.
+    TrackProductAnalyticsEvent {
+        event: ProductAnalyticsEvent,
     },
 
     /// Result of notifying the workspace owner.

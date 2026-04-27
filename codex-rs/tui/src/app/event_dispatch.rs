@@ -564,6 +564,9 @@ impl App {
                     self.send_add_credits_nudge_email(app_server, credit_type);
                 }
             }
+            AppEvent::TrackProductAnalyticsEvent { event } => {
+                self.track_product_analytics_event(app_server, event);
+            }
             AppEvent::AddCreditsNudgeEmailFinished { result } => {
                 self.chat_widget
                     .finish_add_credits_nudge_email_request(result);
