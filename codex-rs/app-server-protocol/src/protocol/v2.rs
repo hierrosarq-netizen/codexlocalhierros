@@ -6274,6 +6274,14 @@ pub enum GuardianApprovalReviewAction {
     },
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
+    McpElicitation {
+        server_name: String,
+        message: String,
+        connector_id: Option<String>,
+        connector_name: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    #[ts(rename_all = "camelCase")]
     RequestPermissions {
         reason: Option<String>,
         permissions: RequestPermissionProfile,
@@ -6329,6 +6337,17 @@ impl From<CoreGuardianAssessmentAction> for GuardianApprovalReviewAction {
                 connector_id,
                 connector_name,
                 tool_title,
+            },
+            CoreGuardianAssessmentAction::McpElicitation {
+                server_name,
+                message,
+                connector_id,
+                connector_name,
+            } => Self::McpElicitation {
+                server_name,
+                message,
+                connector_id,
+                connector_name,
             },
             CoreGuardianAssessmentAction::RequestPermissions {
                 reason,
@@ -6390,6 +6409,17 @@ impl From<GuardianApprovalReviewAction> for CoreGuardianAssessmentAction {
                 connector_id,
                 connector_name,
                 tool_title,
+            },
+            GuardianApprovalReviewAction::McpElicitation {
+                server_name,
+                message,
+                connector_id,
+                connector_name,
+            } => Self::McpElicitation {
+                server_name,
+                message,
+                connector_id,
+                connector_name,
             },
             GuardianApprovalReviewAction::RequestPermissions {
                 reason,
