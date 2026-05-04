@@ -11,6 +11,7 @@ use std::sync::Mutex;
 
 use chrono::SecondsFormat;
 use chrono::Utc;
+use codex_protocol::SegmentId;
 use codex_protocol::ThreadId;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::models::BaseInstructions;
@@ -667,6 +668,7 @@ impl RolloutRecorder {
                     let log_file_info = precompute_log_file_info(config, conversation_id)?;
                     let path = log_file_info.path.clone();
                     let session_id = log_file_info.conversation_id;
+                    let segment_id = SegmentId::new();
                     let started_at = log_file_info.timestamp;
 
                     let timestamp_format: &[FormatItem] = format_description!(
@@ -679,6 +681,7 @@ impl RolloutRecorder {
 
                     let session_meta = SessionMeta {
                         id: session_id,
+                        segment_id: Some(segment_id),
                         forked_from_id,
                         timestamp,
                         cwd: config.cwd().to_path_buf(),
@@ -893,6 +896,12 @@ impl RolloutRecorder {
                     }
                     RolloutItem::ResponseItem(item) => {
                         items.push(RolloutItem::ResponseItem(item));
+                    }
+                    RolloutItem::ForkReference(item) => {
+                        items.push(RolloutItem::ForkReference(item));
+                    }
+                    RolloutItem::RolloutReference(item) => {
+                        items.push(RolloutItem::RolloutReference(item));
                     }
                     RolloutItem::Compacted(item) => {
                         items.push(RolloutItem::Compacted(item));
@@ -1367,28 +1376,43 @@ fn precompute_log_file_info(
     // Resolve ~/.codex/sessions/YYYY/MM/DD path.
     let timestamp = OffsetDateTime::now_local()
         .map_err(|e| IoError::other(format!("failed to get local time: {e}")))?;
-    let mut dir = config.codex_home().to_path_buf();
-    dir.push(SESSIONS_SUBDIR);
-    dir.push(timestamp.year().to_string());
-    dir.push(format!("{:02}", u8::from(timestamp.month())));
-    dir.push(format!("{:02}", timestamp.day()));
 
     // Custom format for YYYY-MM-DDThh-mm-ss. Use `-` instead of `:` for
     // compatibility with filesystems that do not allow colons in filenames.
     let format: &[FormatItem] =
         format_description!("[year]-[month]-[day]T[hour]-[minute]-[second]");
-    let date_str = timestamp
-        .format(format)
-        .map_err(|e| IoError::other(format!("failed to format timestamp: {e}")))?;
-
-    let filename = format!("rollout-{date_str}-{conversation_id}.jsonl");
-
-    let path = dir.join(filename);
+    let mut selected_timestamp = timestamp;
+    let mut path = None;
+    for offset_seconds in 0..60 {
+        let candidate_timestamp = timestamp
+            .checked_add(time::Duration::seconds(offset_seconds))
+            .ok_or_else(|| IoError::other("failed to compute rollout timestamp"))?;
+        let mut dir = config.codex_home().to_path_buf();
+        dir.push(SESSIONS_SUBDIR);
+        dir.push(candidate_timestamp.year().to_string());
+        dir.push(format!("{:02}", u8::from(candidate_timestamp.month())));
+        dir.push(format!("{:02}", candidate_timestamp.day()));
+        let date_str = candidate_timestamp
+            .format(format)
+            .map_err(|e| IoError::other(format!("failed to format timestamp: {e}")))?;
+        let filename = format!("rollout-{date_str}-{conversation_id}.jsonl");
+        let candidate_path = dir.join(filename);
+        if !candidate_path.exists() {
+            selected_timestamp = candidate_timestamp;
+            path = Some(candidate_path);
+            break;
+        }
+    }
+    let path = path.ok_or_else(|| {
+        IoError::other(format!(
+            "failed to find an unused rollout path for thread {conversation_id}"
+        ))
+    })?;
 
     Ok(LogFileInfo {
         path,
         conversation_id,
-        timestamp,
+        timestamp: selected_timestamp,
     })
 }
 
@@ -1884,6 +1908,8 @@ async fn resume_candidate_matches_cwd(
         && let Some(latest_turn_context_cwd) = items.iter().rev().find_map(|item| match item {
             RolloutItem::TurnContext(turn_context) => Some(turn_context.cwd.as_path()),
             RolloutItem::SessionMeta(_)
+            | RolloutItem::ForkReference(_)
+            | RolloutItem::RolloutReference(_)
             | RolloutItem::ResponseItem(_)
             | RolloutItem::Compacted(_)
             | RolloutItem::EventMsg(_) => None,
