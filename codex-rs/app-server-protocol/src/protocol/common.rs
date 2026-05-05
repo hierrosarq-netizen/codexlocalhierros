@@ -2568,7 +2568,9 @@ mod tests {
                 "id": 8,
                 "params": {
                     "cursor": null,
-                    "limit": null
+                    "limit": null,
+                    "cwd": null,
+                    "profile": null
                 }
             }),
             serde_json::to_value(&request)?,
