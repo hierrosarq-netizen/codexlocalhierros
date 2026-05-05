@@ -15,6 +15,8 @@ use codex_protocol::protocol::CreditsSnapshot;
 use codex_protocol::protocol::RateLimitReachedType;
 use codex_protocol::protocol::RateLimitSnapshot;
 use codex_protocol::protocol::RateLimitWindow;
+use codex_protocol::protocol::UsageLimitNudgeAction;
+use codex_protocol::protocol::UsageLimitNudgePayload;
 use reqwest::StatusCode;
 use reqwest::header::CONTENT_TYPE;
 use reqwest::header::HeaderMap;
@@ -452,6 +454,9 @@ impl Client {
             .rate_limit_reached_type
             .flatten()
             .and_then(|details| Self::map_rate_limit_reached_type(details.kind));
+        let current_usage_limit_nudge = payload
+            .current_usage_limit_nudge
+            .and_then(|nudge| Self::map_usage_limit_nudge(*nudge));
         let mut snapshots = vec![Self::make_rate_limit_snapshot(
             Some("codex".to_string()),
             /*limit_name*/ None,
@@ -459,6 +464,7 @@ impl Client {
             payload.credits.flatten().map(|details| *details),
             plan_type,
             rate_limit_reached_type,
+            current_usage_limit_nudge,
         )];
         if let Some(additional) = payload.additional_rate_limits.flatten() {
             snapshots.extend(additional.into_iter().map(|details| {
@@ -469,6 +475,7 @@ impl Client {
                     /*credits*/ None,
                     plan_type,
                     /*rate_limit_reached_type*/ None,
+                    /*current_usage_limit_nudge*/ None,
                 )
             }));
         }
@@ -482,6 +489,7 @@ impl Client {
         credits: Option<crate::types::CreditStatusDetails>,
         plan_type: Option<AccountPlanType>,
         rate_limit_reached_type: Option<RateLimitReachedType>,
+        current_usage_limit_nudge: Option<UsageLimitNudgePayload>,
     ) -> RateLimitSnapshot {
         let (primary, secondary) = match rate_limit {
             Some(details) => (
@@ -498,7 +506,22 @@ impl Client {
             credits: Self::map_credits(credits),
             plan_type,
             rate_limit_reached_type,
+            current_usage_limit_nudge,
         }
+    }
+
+    fn map_usage_limit_nudge(
+        nudge: crate::types::UsageLimitNudge,
+    ) -> Option<UsageLimitNudgePayload> {
+        let action = match nudge.action {
+            crate::types::UsageLimitNudgeAction::AddCredits => UsageLimitNudgeAction::AddCredits,
+            crate::types::UsageLimitNudgeAction::Upgrade => UsageLimitNudgeAction::Upgrade,
+            crate::types::UsageLimitNudgeAction::Unknown => return None,
+        };
+        Some(UsageLimitNudgePayload {
+            threshold: nudge.threshold,
+            action,
+        })
     }
 
     fn map_rate_limit_reached_type(
@@ -661,6 +684,7 @@ mod tests {
             rate_limit_reached_type: Some(Some(BackendRateLimitReachedType {
                 kind: RateLimitReachedKind::WorkspaceMemberCreditsDepleted,
             })),
+            current_usage_limit_nudge: None,
         };
 
         let snapshots = Client::rate_limit_snapshots_from_payload(payload);
@@ -713,6 +737,7 @@ mod tests {
             }])),
             credits: None,
             rate_limit_reached_type: None,
+            current_usage_limit_nudge: None,
         };
 
         let snapshots = Client::rate_limit_snapshots_from_payload(payload);
@@ -739,6 +764,7 @@ mod tests {
                 credits: None,
                 plan_type: Some(AccountPlanType::Pro),
                 rate_limit_reached_type: None,
+                current_usage_limit_nudge: None,
             },
             RateLimitSnapshot {
                 limit_id: Some("codex".to_string()),
@@ -752,6 +778,7 @@ mod tests {
                 credits: None,
                 plan_type: Some(AccountPlanType::Pro),
                 rate_limit_reached_type: None,
+                current_usage_limit_nudge: None,
             },
         ];
 
@@ -796,6 +823,7 @@ mod tests {
                 credits: None,
                 additional_rate_limits: None,
                 rate_limit_reached_type: Some(Some(BackendRateLimitReachedType { kind })),
+                current_usage_limit_nudge: None,
             };
 
             let snapshots = Client::rate_limit_snapshots_from_payload(payload);
@@ -811,10 +839,65 @@ mod tests {
             credits: None,
             additional_rate_limits: None,
             rate_limit_reached_type: None,
+            current_usage_limit_nudge: None,
         };
 
         let snapshots = Client::rate_limit_snapshots_from_payload(payload);
         assert_eq!(snapshots[0].rate_limit_reached_type, None);
+    }
+
+    #[test]
+    fn usage_payload_preserves_current_usage_limit_nudge() {
+        let payload = RateLimitStatusPayload {
+            plan_type: crate::types::PlanType::Plus,
+            rate_limit: None,
+            credits: None,
+            additional_rate_limits: None,
+            rate_limit_reached_type: None,
+            current_usage_limit_nudge: Some(Box::new(crate::types::UsageLimitNudge {
+                threshold: 75,
+                action: crate::types::UsageLimitNudgeAction::AddCredits,
+            })),
+        };
+
+        let snapshots = Client::rate_limit_snapshots_from_payload(payload);
+        assert_eq!(
+            snapshots[0].current_usage_limit_nudge,
+            Some(UsageLimitNudgePayload {
+                threshold: 75,
+                action: UsageLimitNudgeAction::AddCredits,
+            })
+        );
+    }
+
+    #[test]
+    fn usage_payload_preserves_missing_current_usage_limit_nudge() {
+        let payload = RateLimitStatusPayload {
+            plan_type: crate::types::PlanType::Plus,
+            rate_limit: None,
+            credits: None,
+            additional_rate_limits: None,
+            rate_limit_reached_type: None,
+            current_usage_limit_nudge: None,
+        };
+
+        let snapshots = Client::rate_limit_snapshots_from_payload(payload);
+        assert_eq!(snapshots[0].current_usage_limit_nudge, None);
+    }
+
+    #[test]
+    fn usage_payload_drops_unknown_current_usage_limit_nudge_action() {
+        let payload: RateLimitStatusPayload = serde_json::from_value(serde_json::json!({
+            "plan_type": "plus",
+            "current_usage_limit_nudge": {
+                "threshold": 75,
+                "action": "future_action"
+            }
+        }))
+        .expect("unknown nudge action should deserialize");
+
+        let snapshots = Client::rate_limit_snapshots_from_payload(payload);
+        assert_eq!(snapshots[0].current_usage_limit_nudge, None);
     }
 
     #[test]
