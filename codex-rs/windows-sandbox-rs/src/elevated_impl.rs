@@ -30,11 +30,14 @@ mod windows_impl {
     use crate::env::inherit_path_env;
     use crate::env::normalize_null_device_env;
     use crate::identity::require_logon_sandbox_creds;
+    use crate::ipc_framed::EmptyPayload;
+    use crate::ipc_framed::FramedMessage;
     use crate::ipc_framed::Message;
     use crate::ipc_framed::OutputStream;
     use crate::ipc_framed::SpawnRequest;
     use crate::ipc_framed::decode_bytes;
     use crate::ipc_framed::read_frame;
+    use crate::ipc_framed::write_frame;
     use crate::logging::log_failure;
     use crate::logging::log_start;
     use crate::logging::log_success;
@@ -47,6 +50,8 @@ mod windows_impl {
     use crate::token::convert_string_sid_to_sid;
     use anyhow::Result;
     use std::path::Path;
+    use std::sync::Arc;
+    use std::sync::Mutex;
 
     pub use crate::windows_impl::CaptureResult;
 
@@ -84,7 +89,6 @@ mod windows_impl {
         log_start(&command, logs_base_dir);
         let mut protected_metadata_guard =
             prepare_protected_metadata_targets(protected_metadata_targets)?;
-        protected_metadata_guard.arm_sentinel_cleanup()?;
         let sandbox_creds = require_logon_sandbox_creds(
             &policy,
             sandbox_policy_cwd,
@@ -132,6 +136,7 @@ mod windows_impl {
             allow_null_device(psid_to_use);
             allow_named_pipe_device(psid_to_use);
         }
+        protected_metadata_guard.arm_sentinel_cleanup()?;
         let protected_metadata_runtime = protected_metadata_guard.into_runtime()?;
 
         (|| -> Result<CaptureResult> {
@@ -157,7 +162,23 @@ mod windows_impl {
                 spawn_request,
             )?;
             let (pipe_write, mut pipe_read) = transport.into_files();
-            drop(pipe_write);
+            let pipe_write = Arc::new(Mutex::new(pipe_write));
+            {
+                let pipe_write = Arc::clone(&pipe_write);
+                protected_metadata_runtime.set_violation_handler(Box::new(move || {
+                    if let Ok(mut pipe_write) = pipe_write.lock() {
+                        let _ = write_frame(
+                            &mut *pipe_write,
+                            &FramedMessage {
+                                version: 1,
+                                message: Message::Terminate {
+                                    payload: EmptyPayload::default(),
+                                },
+                            },
+                        );
+                    }
+                }))?;
+            }
 
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();

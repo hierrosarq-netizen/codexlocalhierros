@@ -16,6 +16,7 @@ use codex_utils_pty::ProcessDriver;
 use codex_utils_pty::SpawnedProcess;
 use std::collections::HashMap;
 use std::path::Path;
+use std::path::PathBuf;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -36,7 +37,8 @@ pub(crate) async fn spawn_windows_sandbox_session_elevated(
 ) -> Result<SpawnedProcess> {
     let mut protected_metadata_guard =
         prepare_protected_metadata_targets(protected_metadata_targets)?;
-    protected_metadata_guard.arm_sentinel_cleanup()?;
+    let sentinel_deny_exclusions: Vec<PathBuf> =
+        protected_metadata_guard.sentinel_paths().cloned().collect();
 
     let elevated = prepare_elevated_spawn_context(
         policy_json_or_preset,
@@ -46,8 +48,10 @@ pub(crate) async fn spawn_windows_sandbox_session_elevated(
         &mut env_map,
         &command,
         protected_metadata_targets,
+        &sentinel_deny_exclusions,
     )?;
 
+    protected_metadata_guard.arm_sentinel_cleanup()?;
     let protected_metadata_runtime = protected_metadata_guard.into_runtime()?;
     let spawn_request = SpawnRequest {
         command: command.clone(),
@@ -91,6 +95,17 @@ pub(crate) async fn spawn_windows_sandbox_session_elevated(
 
     let outbound_tx = start_runner_pipe_writer(pipe_write);
     let writer_handle = start_runner_stdin_writer(writer_rx, outbound_tx.clone(), tty, stdin_open);
+    {
+        let outbound_tx = outbound_tx.clone();
+        protected_metadata_runtime.set_violation_handler(Box::new(move || {
+            let _ = outbound_tx.send(FramedMessage {
+                version: 1,
+                message: Message::Terminate {
+                    payload: EmptyPayload::default(),
+                },
+            });
+        }))?;
+    }
     let terminator = {
         let outbound_tx = outbound_tx.clone();
         Some(Box::new(move || {

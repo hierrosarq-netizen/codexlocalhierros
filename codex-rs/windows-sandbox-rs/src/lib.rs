@@ -78,6 +78,8 @@ mod session;
 
 #[cfg(target_os = "windows")]
 pub use acl::add_deny_write_ace;
+#[cfg(target_os = "windows")]
+pub use acl::add_deny_write_ace_non_inheriting;
 
 #[cfg(target_os = "windows")]
 pub use acl::allow_named_pipe_device;
@@ -267,6 +269,7 @@ mod windows_impl {
     use super::ProtectedMetadataTarget;
     use super::acl::add_allow_ace;
     use super::acl::add_deny_write_ace;
+    use super::acl::add_deny_write_ace_non_inheriting;
     use super::acl::allow_named_pipe_device;
     use super::acl::allow_null_device;
     use super::acl::ensure_allow_mask_aces;
@@ -289,6 +292,7 @@ mod windows_impl {
     use super::token::convert_string_sid_to_sid;
     use super::token::create_workspace_write_token_with_caps_from;
     use super::workspace_acl::is_command_cwd_root;
+    use anyhow::Context;
     use anyhow::Result;
     use std::collections::HashMap;
     use std::ffi::c_void;
@@ -300,6 +304,7 @@ mod windows_impl {
     use windows_sys::Win32::Foundation::GetLastError;
     use windows_sys::Win32::Foundation::HANDLE;
     use windows_sys::Win32::Foundation::HANDLE_FLAG_INHERIT;
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
     use windows_sys::Win32::Foundation::SetHandleInformation;
     use windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_EXECUTE;
     use windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_READ;
@@ -455,6 +460,8 @@ mod windows_impl {
         let direct_read_paths = legacy_session_direct_read_paths(&env_map);
         let mut protected_metadata_guard =
             prepare_protected_metadata_targets(protected_metadata_targets)?;
+        let sentinel_deny_exclusions: Vec<PathBuf> =
+            protected_metadata_guard.sentinel_paths().cloned().collect();
         for path in protected_metadata_guard.deny_paths() {
             deny.insert(path.clone());
         }
@@ -463,7 +470,7 @@ mod windows_impl {
                 deny.insert(path.clone());
             }
         }
-        protected_metadata_guard.arm_sentinel_cleanup()?;
+        remove_matching_paths(&mut deny, &sentinel_deny_exclusions);
         let canonical_cwd = canonicalize_path(&current_dir);
         let mut guards: Vec<(PathBuf, *mut c_void)> = Vec::new();
         let read_execute_mask = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
@@ -518,6 +525,14 @@ mod windows_impl {
                     guards.push((p.clone(), psid_generic));
                 }
             }
+            for p in &sentinel_deny_exclusions {
+                add_deny_write_ace_non_inheriting(p, psid_generic).with_context(|| {
+                    format!(
+                        "failed to apply protected metadata sentinel ACL to {}",
+                        p.display()
+                    )
+                })?;
+            }
             allow_null_device(psid_generic);
             allow_named_pipe_device(psid_generic);
             if let Some(psid) = psid_workspace {
@@ -525,6 +540,7 @@ mod windows_impl {
                 allow_named_pipe_device(psid);
             }
         }
+        protected_metadata_guard.arm_sentinel_cleanup()?;
         let protected_metadata_runtime = protected_metadata_guard.into_runtime()?;
         let (stdin_pair, stdout_pair, stderr_pair) = unsafe { setup_stdio_pipes()? };
         let ((in_r, in_w), (out_r, out_w), (err_r, err_w)) = (stdin_pair, stdout_pair, stderr_pair);
@@ -555,6 +571,15 @@ mod windows_impl {
             }
         };
         let pi = created.process_info;
+        let child_process_handle = pi.hProcess;
+        protected_metadata_runtime.set_violation_handler(Box::new(move || unsafe {
+            if child_process_handle != 0 && child_process_handle != INVALID_HANDLE_VALUE {
+                let _ = windows_sys::Win32::System::Threading::TerminateProcess(
+                    child_process_handle,
+                    1,
+                );
+            }
+        }))?;
         let _desktop = created;
 
         unsafe {
@@ -666,6 +691,20 @@ mod windows_impl {
             stderr,
             timed_out,
         })
+    }
+
+    fn remove_matching_paths(paths: &mut std::collections::HashSet<PathBuf>, excluded: &[PathBuf]) {
+        if excluded.is_empty() {
+            return;
+        }
+        let excluded_paths: Vec<PathBuf> = excluded
+            .iter()
+            .map(|path| canonicalize_path(path))
+            .collect();
+        paths.retain(|path| {
+            let path = canonicalize_path(path);
+            !excluded_paths.iter().any(|excluded| excluded == &path)
+        });
     }
 
     pub fn run_windows_sandbox_legacy_preflight(
