@@ -968,14 +968,17 @@ impl ConfigBuilder {
                 .unwrap_or(&codex_config::NoopThreadConfigLoader),
         )
         .await?;
-        let merged_toml = config_layer_stack.effective_config();
-
         // Note that each layer in ConfigLayerStack should have resolved
         // relative paths to absolute paths based on the parent folder of the
         // respective config file, so we should be safe to deserialize without
         // AbsolutePathBufGuard here.
-        let config_toml: ConfigToml = match merged_toml.try_into() {
-            Ok(config_toml) => config_toml,
+        //
+        // Invalid enum-valued settings default at the typed field boundary.
+        // The warning scan reads the final merged TOML view without mutating it.
+        let (_merged_toml, config_toml, enum_warnings) = match config_layer_stack
+            .deserialize_effective_config_with_warnings()
+        {
+            Ok(result) => result,
             Err(err) => {
                 if let Some(config_error) = codex_config::first_layer_config_error::<ConfigToml>(
                     &config_layer_stack,
@@ -992,6 +995,7 @@ impl ConfigBuilder {
                 return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, err));
             }
         };
+        let config_layer_stack = config_layer_stack.with_additional_startup_warnings(enum_warnings);
         let config_lock_settings = config_toml
             .debug
             .as_ref()
@@ -1005,7 +1009,8 @@ impl ConfigBuilder {
             let save_fields_resolved_from_model_catalog = config_lock_settings
                 .and_then(|config_lock| config_lock.save_fields_resolved_from_model_catalog)
                 .unwrap_or(true);
-            let lockfile_toml = read_config_lock_from_path(config_lock_load_path).await?;
+            let (lockfile_toml, lock_enum_warnings) =
+                read_config_lock_from_path(config_lock_load_path).await?;
             let expected_lock_config = lockfile_toml.clone();
             let lock_layer = lock_layer_from_config(config_lock_load_path, &lockfile_toml)?;
             let lock_config_toml = config_without_lock_controls(&lockfile_toml.config);
@@ -1013,7 +1018,8 @@ impl ConfigBuilder {
                 vec![lock_layer],
                 config_layer_stack.requirements().clone(),
                 config_layer_stack.requirements_toml().clone(),
-            )?;
+            )?
+            .with_additional_startup_warnings(lock_enum_warnings);
             let mut config = Config::load_config_with_layer_stack(
                 LOCAL_FS.as_ref(),
                 lock_config_toml,
@@ -1297,11 +1303,17 @@ pub async fn load_config_as_toml_with_cli_and_loader_overrides(
     )
     .await?;
 
-    let merged_toml = config_layer_stack.effective_config();
-    let cfg = deserialize_config_toml_with_base(merged_toml, codex_home).map_err(|e| {
-        tracing::error!("Failed to deserialize overridden config: {e}");
-        e
-    })?;
+    let _guard = AbsolutePathBufGuard::new(codex_home);
+    // This helper returns ConfigToml directly, so enum warnings are intentionally
+    // not surfaced here. The full ConfigBuilder path is responsible for
+    // attaching them to startup warnings.
+    let (_merged_toml, cfg, _enum_warnings) = config_layer_stack
+        .deserialize_effective_config_with_warnings()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        .map_err(|e| {
+            tracing::error!("Failed to deserialize overridden config: {e}");
+            e
+        })?;
 
     Ok(cfg)
 }

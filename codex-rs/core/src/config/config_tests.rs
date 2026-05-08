@@ -8889,6 +8889,55 @@ save_fields_resolved_from_model_catalog = false
 }
 
 #[tokio::test]
+async fn debug_config_lockfile_load_path_reports_invalid_enum_warnings() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let lock_path = codex_home.path().join("session.config.lock.toml");
+    std::fs::write(
+        &lock_path,
+        format!(
+            r#"version = {}
+codex_version = "older-version"
+
+[config]
+model = "gpt-5-codex"
+sandbox_mode = "make-it-so"
+"#,
+            crate::config_lock::CONFIG_LOCK_VERSION
+        ),
+    )?;
+    std::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
+        format!(
+            r#"[debug.config_lockfile]
+load_path = '{}'
+allow_codex_version_mismatch = true
+"#,
+            lock_path.display()
+        ),
+    )?;
+
+    let config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(codex_home.path().to_path_buf()))
+        .build()
+        .await?;
+
+    assert_eq!(
+        (
+            config.model,
+            config.config_lock_toml.is_some(),
+            config.startup_warnings,
+        ),
+        (
+            Some("gpt-5-codex".to_string()),
+            true,
+            vec!["Ignoring invalid config value at sandbox_mode: \"make-it-so\"".to_string()],
+        )
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn explicit_feature_config_is_normalized_by_requirements() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     std::fs::write(
@@ -10060,17 +10109,15 @@ fn test_tui_notification_condition_always() {
 }
 
 #[test]
-fn test_tui_notification_condition_rejects_unknown_value() {
+fn test_tui_notification_condition_defaults_unknown_value() {
     let toml = r#"
             [tui]
             notification_condition = "background"
         "#;
-    let err = toml::from_str::<RootTomlTest>(toml).expect_err("reject unknown condition");
-    let err = err.to_string();
-    assert!(
-        err.contains("unknown variant `background`")
-            && err.contains("unfocused")
-            && err.contains("always"),
-        "unexpected error: {err}"
+    let parsed: RootTomlTest =
+        toml::from_str(toml).expect("deserialize invalid notification condition as default");
+    assert_eq!(
+        parsed.tui.notifications.condition,
+        NotificationCondition::Unfocused
     );
 }

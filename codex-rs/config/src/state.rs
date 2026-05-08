@@ -1,10 +1,12 @@
 use crate::config_requirements::ConfigRequirements;
 use crate::config_requirements::ConfigRequirementsToml;
 
+use super::enum_warnings::invalid_enum_warnings;
 use super::fingerprint::record_origins;
 use super::fingerprint::version_for_toml;
 use super::key_aliases::normalized_with_key_aliases;
 use super::merge::merge_toml_values;
+use crate::config_toml::ConfigToml;
 use codex_app_server_protocol::ConfigLayer;
 use codex_app_server_protocol::ConfigLayerMetadata;
 use codex_app_server_protocol::ConfigLayerSource;
@@ -212,6 +214,22 @@ impl ConfigLayerStack {
         self
     }
 
+    /// Appends warnings discovered after the raw layers have been assembled.
+    ///
+    /// Invalid enum warnings are produced while preparing the typed effective
+    /// config, after the stack has already been constructed. Keeping this merge
+    /// point on the stack lets callers surface them through the same startup
+    /// warning channel used by file-level config diagnostics.
+    pub fn with_additional_startup_warnings(mut self, warnings: Vec<String>) -> Self {
+        if warnings.is_empty() {
+            return self;
+        }
+        self.startup_warnings
+            .get_or_insert_with(Vec::new)
+            .extend(warnings);
+        self
+    }
+
     pub fn startup_warnings(&self) -> Option<&[String]> {
         self.startup_warnings.as_deref()
     }
@@ -304,6 +322,20 @@ impl ConfigLayerStack {
             merge_toml_values(&mut merged, &layer.config);
         }
         merged
+    }
+
+    /// Deserializes the merged config-layer view and returns any soft warnings.
+    ///
+    /// Invalid enum-valued settings are reported from the final raw TOML view.
+    /// Narrow typed-config fallbacks keep those warnings advisory without
+    /// changing unrelated config semantics.
+    pub fn deserialize_effective_config_with_warnings(
+        &self,
+    ) -> Result<(TomlValue, ConfigToml, Vec<String>), toml::de::Error> {
+        let merged = self.effective_config();
+        let warnings = invalid_enum_warnings(&merged);
+        let typed = merged.clone().try_into::<ConfigToml>()?;
+        Ok((merged, typed, warnings))
     }
 
     /// Returns field origins for the merged config-layer view.

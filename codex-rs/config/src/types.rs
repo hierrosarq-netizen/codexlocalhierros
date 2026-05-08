@@ -27,6 +27,9 @@ use std::fmt;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
+use serde_with::DefaultOnError;
+use serde_with::VecSkipError;
+use serde_with::serde_as;
 
 pub use crate::tui_keymap::KeybindingSpec;
 pub use crate::tui_keymap::KeybindingsSpec;
@@ -118,9 +121,12 @@ pub enum WindowsSandboxModeToml {
     Unelevated,
 }
 
+#[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct WindowsToml {
+    #[serde(default)]
+    #[serde_as(deserialize_as = "DefaultOnError")]
     pub sandbox: Option<WindowsSandboxModeToml>,
     /// Defaults to `true`. Set to `false` to launch the final sandboxed child
     /// process on `Winsta0\\Default` instead of a private desktop.
@@ -159,11 +165,13 @@ impl UriBasedFileOpener {
 }
 
 /// Settings that govern if and what will be written to `~/.codex/history.jsonl`.
+#[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema)]
 #[serde(default)]
 #[schemars(deny_unknown_fields)]
 pub struct History {
     /// If true, history entries will not be written to disk.
+    #[serde_as(deserialize_as = "DefaultOnError")]
     pub persistence: HistoryPersistence,
 
     /// If set, the maximum size of the history file in bytes. The oldest entries
@@ -245,12 +253,15 @@ impl ToolSuggestDisabledTool {
     }
 }
 
+#[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct ToolSuggestConfig {
     #[serde(default)]
+    #[serde_as(deserialize_as = "VecSkipError<_>")]
     pub discoverables: Vec<ToolSuggestDiscoverable>,
     #[serde(default)]
+    #[serde_as(deserialize_as = "VecSkipError<_>")]
     pub disabled_tools: Vec<ToolSuggestDisabledTool>,
 }
 
@@ -389,6 +400,7 @@ pub struct AppsDefaultConfig {
 }
 
 /// Per-tool settings for a single app tool.
+#[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct AppToolConfig {
@@ -398,6 +410,7 @@ pub struct AppToolConfig {
 
     /// Approval mode for this tool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde_as(deserialize_as = "DefaultOnError")]
     pub approval_mode: Option<AppToolApproval>,
 }
 
@@ -411,6 +424,7 @@ pub struct AppToolsConfig {
 }
 
 /// Config values for a single app/connector.
+#[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct AppConfig {
@@ -428,6 +442,7 @@ pub struct AppConfig {
 
     /// Approval mode for tools in this app unless a tool override exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde_as(deserialize_as = "DefaultOnError")]
     pub default_tools_approval_mode: Option<AppToolApproval>,
 
     /// Whether tools are enabled by default for this app.
@@ -497,6 +512,7 @@ pub enum OtelExporterKind {
 }
 
 /// OTEL settings loaded from config.toml. Fields are optional so we can apply defaults.
+#[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct OtelConfigToml {
@@ -507,12 +523,18 @@ pub struct OtelConfigToml {
     pub environment: Option<String>,
 
     /// Optional log exporter
+    #[serde(default)]
+    #[serde_as(deserialize_as = "DefaultOnError")]
     pub exporter: Option<OtelExporterKind>,
 
     /// Optional trace exporter
+    #[serde(default)]
+    #[serde_as(deserialize_as = "DefaultOnError")]
     pub trace_exporter: Option<OtelExporterKind>,
 
     /// Optional metrics exporter
+    #[serde(default)]
+    #[serde_as(deserialize_as = "DefaultOnError")]
     pub metrics_exporter: Option<OtelExporterKind>,
 
     /// Attributes to add to every exported trace span.
@@ -599,22 +621,26 @@ impl fmt::Display for NotificationCondition {
     }
 }
 
+#[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct TuiNotificationSettings {
     /// Enable desktop notifications from the TUI.
     /// Defaults to `true`.
     #[serde(default, rename = "notifications")]
+    #[serde_as(deserialize_as = "DefaultOnError")]
     pub notifications: Notifications,
 
     /// Notification method to use for terminal notifications.
     /// Defaults to `auto`.
     #[serde(default, rename = "notification_method")]
+    #[serde_as(deserialize_as = "DefaultOnError")]
     pub method: NotificationMethod,
 
     /// Controls whether TUI notifications are delivered only when the terminal is unfocused or
     /// regardless of focus. Defaults to `unfocused`.
     #[serde(default, rename = "notification_condition")]
+    #[serde_as(deserialize_as = "DefaultOnError")]
     pub condition: NotificationCondition,
 }
 
@@ -630,6 +656,7 @@ pub struct ModelAvailabilityNuxConfig {
 pub const DEFAULT_TERMINAL_RESIZE_REFLOW_FALLBACK_MAX_ROWS: usize = 1_000;
 
 /// Collection of settings that are specific to the TUI.
+#[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct Tui {
@@ -665,6 +692,7 @@ pub struct Tui {
     /// Using alternate screen provides a cleaner fullscreen experience but prevents
     /// scrollback in terminal multiplexers like Zellij that follow the xterm spec.
     #[serde(default)]
+    #[serde_as(deserialize_as = "DefaultOnError")]
     pub alternate_screen: AltScreenMode,
 
     /// Ordered list of status line item identifiers.
@@ -697,6 +725,7 @@ pub struct Tui {
 
     /// Preferred layout for resume/fork session picker results.
     #[serde(default)]
+    #[serde_as(deserialize_as = "DefaultOnError")]
     pub session_picker_view: Option<SessionPickerViewMode>,
 
     /// Keybinding overrides for the TUI.
@@ -783,6 +812,7 @@ pub struct PluginConfig {
 ///
 /// This intentionally excludes transport settings: plugin manifests own how the
 /// MCP server is launched, while user config owns enablement and tool policy.
+#[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct PluginMcpServerConfig {
@@ -792,6 +822,7 @@ pub struct PluginMcpServerConfig {
 
     /// Approval mode for tools in this server unless a tool override exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde_as(deserialize_as = "DefaultOnError")]
     pub default_tools_approval_mode: Option<AppToolApproval>,
 
     /// Explicit allow-list of tools exposed from this server.
@@ -819,6 +850,7 @@ impl Default for PluginMcpServerConfig {
     }
 }
 
+#[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct MarketplaceConfig {
@@ -830,6 +862,7 @@ pub struct MarketplaceConfig {
     pub last_revision: Option<String>,
     /// Source kind used to install this marketplace.
     #[serde(default)]
+    #[serde_as(deserialize_as = "DefaultOnError")]
     pub source_type: Option<MarketplaceSourceType>,
     /// Source location used when the marketplace was added.
     #[serde(default)]
@@ -875,9 +908,12 @@ impl From<SandboxWorkspaceWrite> for codex_app_server_protocol::SandboxSettings 
 
 /// Policy for building the `env` when spawning a process via either the
 /// `shell` or `local_shell` tool.
+#[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct ShellEnvironmentPolicyToml {
+    #[serde(default)]
+    #[serde_as(deserialize_as = "DefaultOnError")]
     pub inherit: Option<ShellEnvironmentPolicyInherit>,
 
     pub ignore_default_excludes: Option<bool>,

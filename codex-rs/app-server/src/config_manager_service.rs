@@ -17,6 +17,7 @@ use codex_config::ConfigLayerStack;
 use codex_config::ConfigLayerStackOrdering;
 use codex_config::ConfigRequirementsToml;
 use codex_config::config_toml::ConfigToml;
+use codex_config::invalid_enum_warnings;
 use codex_config::merge_toml_values;
 use codex_core::config::deserialize_config_toml_with_base;
 use codex_core::config::edit::ConfigEdit;
@@ -241,6 +242,30 @@ impl ConfigManager {
             let parsed_value = parse_value(value).map_err(|message| {
                 ConfigManagerError::write(ConfigWriteErrorCode::ConfigValidationError, message)
             })?;
+            if let Some(value) = parsed_value.as_ref() {
+                // Reject enum mistakes introduced by this edit only. The full
+                // config parse below still checks the resulting shape, while
+                // stale enum values elsewhere remain startup warnings.
+                let mut edited_config = TomlValue::Table(toml::map::Map::new());
+                apply_merge(
+                    &mut edited_config,
+                    &segments,
+                    Some(value),
+                    MergeStrategy::Replace,
+                )
+                .map_err(|err| match err {
+                    MergeError::Validation(message) => ConfigManagerError::write(
+                        ConfigWriteErrorCode::ConfigValidationError,
+                        message,
+                    ),
+                })?;
+                if let Some(warning) = invalid_enum_warnings(&edited_config).into_iter().next() {
+                    return Err(ConfigManagerError::write(
+                        ConfigWriteErrorCode::ConfigValidationError,
+                        format!("Invalid configuration: {warning}"),
+                    ));
+                }
+            }
 
             apply_merge(&mut user_config, &segments, parsed_value.as_ref(), strategy).map_err(
                 |err| match err {

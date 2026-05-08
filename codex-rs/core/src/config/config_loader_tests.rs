@@ -23,8 +23,12 @@ use codex_config::config_toml::ConfigToml;
 use codex_config::config_toml::ProjectConfig;
 use codex_config::loader::load_config_layers_state;
 use codex_config::loader::load_requirements_toml;
+use codex_config::types::ToolSuggestDisabledTool;
+use codex_config::types::ToolSuggestDiscoverable;
+use codex_config::types::ToolSuggestDiscoverableType;
 use codex_config::version_for_toml;
 use codex_exec_server::LOCAL_FS;
+use codex_model_provider_info::WireApi;
 use codex_protocol::config_types::TrustLevel;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::models::PermissionProfile;
@@ -33,6 +37,7 @@ use codex_protocol::protocol::SandboxPolicy;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::path::Path;
 use tempfile::tempdir;
@@ -116,6 +121,368 @@ async fn returns_config_error_for_invalid_user_config_toml() {
     let expected_toml_error = toml::from_str::<TomlValue>(contents).expect_err("parse error");
     let expected_config_error = config_error_from_toml(&config_path, contents, expected_toml_error);
     assert_eq!(config_error, &expected_config_error);
+}
+
+#[tokio::test]
+async fn invalid_enum_values_emit_warnings_without_poisoning_config() -> anyhow::Result<()> {
+    let tmp = tempdir().expect("tempdir");
+    let contents = r#"
+model = "gpt-5-codex"
+sandbox_mode = "make-it-so"
+
+[tui]
+notification_method = "loudly"
+theme = "loudly"
+
+[tools.web_search]
+context_size = "galactic"
+"#;
+    let config_path = tmp.path().join(CONFIG_TOML_FILE);
+    std::fs::write(&config_path, contents).expect("write config");
+
+    let cwd = AbsolutePathBuf::try_from(tmp.path()).expect("cwd");
+    let layers = load_config_layers_state(
+        LOCAL_FS.as_ref(),
+        tmp.path(),
+        Some(cwd),
+        &[] as &[(String, TomlValue)],
+        LoaderOverrides::default(),
+        CloudRequirementsLoader::default(),
+        &codex_config::NoopThreadConfigLoader,
+    )
+    .await?;
+
+    // The warning pass reads the final TOML value without mutating it, while
+    // field-level fallbacks let unrelated valid settings still deserialize.
+    let (effective_config, _config_toml, enum_warnings) =
+        layers.deserialize_effective_config_with_warnings()?;
+    let expected_config = toml::from_str::<TomlValue>(
+        r#"
+model = "gpt-5-codex"
+sandbox_mode = "make-it-so"
+
+[tui]
+notification_method = "loudly"
+theme = "loudly"
+
+[tools.web_search]
+context_size = "galactic"
+"#,
+    )
+    .expect("expected config should parse");
+    let expected_startup_warnings = vec![
+        "Ignoring invalid config value at sandbox_mode: \"make-it-so\"".to_string(),
+        "Ignoring invalid config value at tools.web_search.context_size: \"galactic\"".to_string(),
+        "Ignoring invalid config value at tui.notification_method: \"loudly\"".to_string(),
+    ];
+
+    assert_eq!(
+        (effective_config, enum_warnings),
+        (expected_config, expected_startup_warnings)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn nested_invalid_enum_values_emit_warnings_without_poisoning_config() -> anyhow::Result<()> {
+    let tmp = tempdir().expect("tempdir");
+    let contents = r#"
+[model_providers.custom]
+name = "Custom"
+base_url = "https://example.invalid/v1"
+wire_api = "telegraph"
+
+[otel.exporter.otlp-http]
+endpoint = "http://localhost:4318/v1/logs"
+protocol = "xml"
+
+[otel.trace_exporter.otlp-http]
+endpoint = "http://localhost:4318/v1/traces"
+protocol = "yaml"
+"#;
+    let config_path = tmp.path().join(CONFIG_TOML_FILE);
+    std::fs::write(&config_path, contents).expect("write config");
+
+    let cwd = AbsolutePathBuf::try_from(tmp.path()).expect("cwd");
+    let layers = load_config_layers_state(
+        LOCAL_FS.as_ref(),
+        tmp.path(),
+        Some(cwd),
+        &[] as &[(String, TomlValue)],
+        LoaderOverrides::default(),
+        CloudRequirementsLoader::default(),
+        &codex_config::NoopThreadConfigLoader,
+    )
+    .await?;
+
+    let (_effective_config, config_toml, enum_warnings) =
+        layers.deserialize_effective_config_with_warnings()?;
+    let otel = config_toml.otel.expect("otel config should deserialize");
+    let expected_warnings = BTreeSet::from([
+        "Ignoring invalid config value at model_providers.custom.wire_api: \"telegraph\""
+            .to_string(),
+        "Ignoring invalid config value at otel.exporter.otlp-http.protocol: \"xml\"".to_string(),
+        "Ignoring invalid config value at otel.trace_exporter.otlp-http.protocol: \"yaml\""
+            .to_string(),
+    ]);
+
+    assert_eq!(
+        (
+            config_toml
+                .model_providers
+                .get("custom")
+                .map(|provider| provider.wire_api),
+            otel.exporter,
+            otel.trace_exporter,
+            enum_warnings.into_iter().collect::<BTreeSet<_>>(),
+        ),
+        (Some(WireApi::Responses), None, None, expected_warnings)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn invalid_project_and_tool_suggest_enums_warn_without_poisoning_config() -> anyhow::Result<()>
+{
+    let tmp = tempdir().expect("tempdir");
+    let project_key = "/tmp/codex-invalid-enum-project";
+    let contents = format!(
+        r#"
+[projects."{project_key}"]
+trust_level = "semi-trusted"
+
+[tool_suggest]
+discoverables = [
+  {{ type = "plugin", id = "plugin_alpha@openai-curated" }},
+  {{ type = "spaceship", id = "bad_plugin" }},
+]
+disabled_tools = [
+  {{ type = "connector", id = "connector_calendar" }},
+  {{ type = "spaceship", id = "bad_connector" }},
+]
+"#
+    );
+    let config_path = tmp.path().join(CONFIG_TOML_FILE);
+    std::fs::write(&config_path, contents).expect("write config");
+
+    let cwd = AbsolutePathBuf::try_from(tmp.path()).expect("cwd");
+    let layers = load_config_layers_state(
+        LOCAL_FS.as_ref(),
+        tmp.path(),
+        Some(cwd),
+        &[] as &[(String, TomlValue)],
+        LoaderOverrides::default(),
+        CloudRequirementsLoader::default(),
+        &codex_config::NoopThreadConfigLoader,
+    )
+    .await?;
+
+    let (_effective_config, config_toml, enum_warnings) =
+        layers.deserialize_effective_config_with_warnings()?;
+    let projects = config_toml.projects.expect("projects should deserialize");
+    let tool_suggest = config_toml
+        .tool_suggest
+        .expect("tool_suggest should deserialize");
+    let expected_warnings = BTreeSet::from([
+        format!(
+            "Ignoring invalid config value at projects.\"{project_key}\".trust_level: \"semi-trusted\""
+        ),
+        "Ignoring invalid config value at tool_suggest.disabled_tools[1].type: \"spaceship\""
+            .to_string(),
+        "Ignoring invalid config value at tool_suggest.discoverables[1].type: \"spaceship\""
+            .to_string(),
+    ]);
+
+    assert_eq!(
+        (
+            projects
+                .get(project_key)
+                .and_then(|project| project.trust_level),
+            tool_suggest.discoverables,
+            tool_suggest.disabled_tools,
+            enum_warnings.into_iter().collect::<BTreeSet<_>>(),
+        ),
+        (
+            None,
+            vec![ToolSuggestDiscoverable {
+                kind: ToolSuggestDiscoverableType::Plugin,
+                id: "plugin_alpha@openai-curated".to_string(),
+            }],
+            vec![ToolSuggestDisabledTool::connector("connector_calendar")],
+            expected_warnings,
+        )
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn invalid_higher_precedence_enum_warns_without_mutating_merge() -> anyhow::Result<()> {
+    let tmp = tempdir().expect("tempdir");
+    let system_config_path = tmp.path().join("system_config.toml");
+    std::fs::write(&system_config_path, r#"sandbox_mode = "workspace-write""#)
+        .expect("write system config");
+    std::fs::write(
+        tmp.path().join(CONFIG_TOML_FILE),
+        r#"sandbox_mode = "make-it-so""#,
+    )
+    .expect("write user config");
+
+    let cwd = AbsolutePathBuf::try_from(tmp.path()).expect("cwd");
+    let layers = load_config_layers_state(
+        LOCAL_FS.as_ref(),
+        tmp.path(),
+        Some(cwd),
+        &[] as &[(String, TomlValue)],
+        LoaderOverrides {
+            system_config_path: Some(system_config_path),
+            ..LoaderOverrides::without_managed_config_for_tests()
+        },
+        CloudRequirementsLoader::default(),
+        &codex_config::NoopThreadConfigLoader,
+    )
+    .await?;
+
+    let (effective_config, config_toml, enum_warnings) =
+        layers.deserialize_effective_config_with_warnings()?;
+
+    assert_eq!(
+        (
+            effective_config.get("sandbox_mode"),
+            config_toml.sandbox_mode,
+            enum_warnings,
+        ),
+        (
+            Some(&TomlValue::String("make-it-so".to_string())),
+            None,
+            vec!["Ignoring invalid config value at sandbox_mode: \"make-it-so\"".to_string()],
+        )
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn invalid_enum_values_do_not_poison_relative_path_resolution() -> anyhow::Result<()> {
+    let tmp = tempdir().expect("tempdir");
+    std::fs::write(
+        tmp.path().join(CONFIG_TOML_FILE),
+        r#"
+model_instructions_file = "instructions.md"
+sandbox_mode = "make-it-so"
+
+[tui]
+notification_method = "loudly"
+"#,
+    )
+    .expect("write config");
+    std::fs::write(tmp.path().join("instructions.md"), "resolved instructions")
+        .expect("write instructions");
+
+    let config = ConfigBuilder::default()
+        .codex_home(tmp.path().to_path_buf())
+        .harness_overrides(ConfigOverrides {
+            cwd: Some(tmp.path().to_path_buf()),
+            ..Default::default()
+        })
+        .build()
+        .await?;
+
+    assert_eq!(
+        (config.base_instructions.as_deref(), config.startup_warnings,),
+        (
+            Some("resolved instructions"),
+            vec![
+                "Ignoring invalid config value at sandbox_mode: \"make-it-so\"".to_string(),
+                "Ignoring invalid config value at tui.notification_method: \"loudly\"".to_string(),
+            ],
+        )
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn invalid_non_enum_union_value_does_not_delete_tui_table() -> anyhow::Result<()> {
+    let tmp = tempdir().expect("tempdir");
+    let contents = r#"
+[tui]
+notifications = "sometimes"
+theme = "sometimes"
+"#;
+    let config_path = tmp.path().join(CONFIG_TOML_FILE);
+    std::fs::write(&config_path, contents).expect("write config");
+
+    let cwd = AbsolutePathBuf::try_from(tmp.path()).expect("cwd");
+    let layers = load_config_layers_state(
+        LOCAL_FS.as_ref(),
+        tmp.path(),
+        Some(cwd),
+        &[] as &[(String, TomlValue)],
+        LoaderOverrides::default(),
+        CloudRequirementsLoader::default(),
+        &codex_config::NoopThreadConfigLoader,
+    )
+    .await?;
+
+    let (effective_config, _config_toml, enum_warnings) =
+        layers.deserialize_effective_config_with_warnings()?;
+    let expected = (
+        toml::from_str::<TomlValue>(
+            r#"
+[tui]
+notifications = "sometimes"
+theme = "sometimes"
+"#,
+        )
+        .expect("expected config should parse"),
+        Vec::<String>::new(),
+    );
+
+    assert_eq!((effective_config, enum_warnings), expected);
+    Ok(())
+}
+
+#[tokio::test]
+async fn invalid_enum_warning_paths_preserve_literal_dotted_keys() -> anyhow::Result<()> {
+    let tmp = tempdir().expect("tempdir");
+    let contents = r#"
+[profiles."alpha.beta"]
+model = "gpt-5-codex"
+sandbox_mode = "hold-my-coffee"
+"#;
+    let config_path = tmp.path().join(CONFIG_TOML_FILE);
+    std::fs::write(&config_path, contents).expect("write config");
+
+    let cwd = AbsolutePathBuf::try_from(tmp.path()).expect("cwd");
+    let layers = load_config_layers_state(
+        LOCAL_FS.as_ref(),
+        tmp.path(),
+        Some(cwd),
+        &[] as &[(String, TomlValue)],
+        LoaderOverrides::default(),
+        CloudRequirementsLoader::default(),
+        &codex_config::NoopThreadConfigLoader,
+    )
+    .await?;
+
+    let (effective_config, _config_toml, enum_warnings) =
+        layers.deserialize_effective_config_with_warnings()?;
+    let expected = (
+        toml::from_str::<TomlValue>(
+            r#"
+[profiles."alpha.beta"]
+model = "gpt-5-codex"
+sandbox_mode = "hold-my-coffee"
+"#,
+        )
+        .expect("expected config should parse"),
+        vec![
+            "Ignoring invalid config value at profiles.\"alpha.beta\".sandbox_mode: \
+             \"hold-my-coffee\""
+                .to_string(),
+        ],
+    );
+
+    assert_eq!((effective_config, enum_warnings), expected);
+    Ok(())
 }
 
 #[tokio::test]
