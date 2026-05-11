@@ -34,7 +34,7 @@ use crate::server::EffectiveMcpServer;
 use crate::server::McpServerMetadata;
 use crate::tools::ToolInfo;
 use crate::tools::filter_tools;
-use crate::tools::normalize_tools_for_model;
+use crate::tools::normalize_tools_for_model_with_prefix;
 use crate::tools::tool_with_model_visible_input_schema;
 use anyhow::Context;
 use anyhow::Result;
@@ -74,6 +74,7 @@ pub struct McpConnectionManager {
     clients: HashMap<String, AsyncManagedClient>,
     server_metadata: HashMap<String, McpServerMetadata>,
     host_owned_codex_apps_enabled: bool,
+    prefix_mcp_tool_names: bool,
     elicitation_requests: ElicitationRequestManager,
     startup_cancellation_token: CancellationToken,
 }
@@ -82,11 +83,13 @@ impl McpConnectionManager {
     pub fn new_uninitialized(
         approval_policy: &Constrained<AskForApproval>,
         permission_profile: &Constrained<PermissionProfile>,
+        prefix_mcp_tool_names: bool,
     ) -> Self {
         Self {
             clients: HashMap::new(),
             server_metadata: HashMap::new(),
             host_owned_codex_apps_enabled: false,
+            prefix_mcp_tool_names,
             elicitation_requests: ElicitationRequestManager::new(
                 approval_policy.value(),
                 permission_profile.get().clone(),
@@ -179,6 +182,7 @@ impl McpConnectionManager {
         codex_home: PathBuf,
         codex_apps_tools_cache_key: CodexAppsToolsCacheKey,
         host_owned_codex_apps_enabled: bool,
+        prefix_mcp_tool_names: bool,
         client_elicitation_capability: ElicitationCapability,
         tool_plugin_provenance: ToolPluginProvenance,
         auth: Option<&CodexAuth>,
@@ -290,6 +294,7 @@ impl McpConnectionManager {
             clients,
             server_metadata,
             host_owned_codex_apps_enabled,
+            prefix_mcp_tool_names,
             elicitation_requests: elicitation_requests.clone(),
             startup_cancellation_token: cancel_token.clone(),
         };
@@ -375,7 +380,7 @@ impl McpConnectionManager {
             };
             tools.extend(server_tools);
         }
-        normalize_tools_for_model(tools)
+        normalize_tools_for_model_with_prefix(tools, self.prefix_mcp_tool_names)
     }
 
     /// Force-refresh codex apps tools by bypassing the in-process cache.
@@ -426,7 +431,10 @@ impl McpConnectionManager {
                 tool.tool = tool_with_model_visible_input_schema(&tool.tool);
                 tool
             });
-        Ok(normalize_tools_for_model(tools))
+        Ok(normalize_tools_for_model_with_prefix(
+            tools,
+            self.prefix_mcp_tool_names,
+        ))
     }
 
     /// Returns a single map that contains all resources. Each key is the

@@ -13,7 +13,7 @@ use crate::rmcp_client::StartupOutcomeError;
 use crate::tools::ToolFilter;
 use crate::tools::ToolInfo;
 use crate::tools::filter_tools;
-use crate::tools::normalize_tools_for_model;
+use crate::tools::normalize_tools_for_model_with_prefix;
 use crate::tools::tool_with_model_visible_input_schema;
 use codex_config::Constrained;
 use codex_config::McpServerConfig;
@@ -35,11 +35,10 @@ use std::sync::Arc;
 use tempfile::tempdir;
 
 fn create_test_tool(server_name: &str, tool_name: &str) -> ToolInfo {
-    let tool_namespace = format!("mcp__{server_name}__");
     ToolInfo {
         server_name: server_name.to_string(),
         callable_name: tool_name.to_string(),
-        callable_namespace: tool_namespace,
+        callable_namespace: server_name.to_string(),
         namespace_description: None,
         tool: Tool {
             name: tool_name.to_string().into(),
@@ -93,7 +92,10 @@ fn model_tool_names(tools: &[ToolInfo]) -> HashSet<ToolName> {
 }
 
 fn model_tool_name_len(name: &ToolName) -> usize {
-    name.namespace.as_deref().map_or(0, str::len) + name.name.len()
+    name.namespace
+        .as_deref()
+        .map_or(0, |namespace| namespace.len() + "__".len())
+        + name.name.len()
 }
 
 fn is_code_mode_compatible_tool_name(name: &ToolName) -> bool {
@@ -297,13 +299,14 @@ fn test_normalize_tools_short_non_duplicated_names() {
         create_test_tool("server1", "tool2"),
     ];
 
-    let model_tools = normalize_tools_for_model(tools);
+    let model_tools =
+        normalize_tools_for_model_with_prefix(tools, /*prefix_mcp_tool_names*/ true);
 
     assert_eq!(
         model_tool_names(&model_tools),
         HashSet::from([
-            ToolName::namespaced("mcp__server1__", "tool1"),
-            ToolName::namespaced("mcp__server1__", "tool2")
+            ToolName::namespaced("mcp__server1", "tool1"),
+            ToolName::namespaced("mcp__server1", "tool2")
         ])
     );
 }
@@ -315,12 +318,13 @@ fn test_normalize_tools_duplicated_names_skipped() {
         create_test_tool("server1", "duplicate_tool"),
     ];
 
-    let model_tools = normalize_tools_for_model(tools);
+    let model_tools =
+        normalize_tools_for_model_with_prefix(tools, /*prefix_mcp_tool_names*/ true);
 
     // Only the first tool should remain, the second is skipped
     assert_eq!(
         model_tool_names(&model_tools),
-        HashSet::from([ToolName::namespaced("mcp__server1__", "duplicate_tool")])
+        HashSet::from([ToolName::namespaced("mcp__server1", "duplicate_tool")])
     );
 }
 
@@ -339,7 +343,8 @@ fn test_normalize_tools_long_names_same_server() {
         ),
     ];
 
-    let model_tools = normalize_tools_for_model(tools);
+    let model_tools =
+        normalize_tools_for_model_with_prefix(tools, /*prefix_mcp_tool_names*/ true);
 
     assert_eq!(model_tools.len(), 2);
 
@@ -349,7 +354,7 @@ fn test_normalize_tools_long_names_same_server() {
     assert!(
         names
             .iter()
-            .all(|name| name.namespace.as_deref() == Some("mcp__my_server__"))
+            .all(|name| name.namespace.as_deref() == Some("mcp__my_server"))
     );
     assert!(
         names.iter().all(is_code_mode_compatible_tool_name),
@@ -361,14 +366,15 @@ fn test_normalize_tools_long_names_same_server() {
 fn test_normalize_tools_sanitizes_invalid_characters() {
     let tools = vec![create_test_tool("server.one", "tool.two-three")];
 
-    let model_tools = normalize_tools_for_model(tools);
+    let model_tools =
+        normalize_tools_for_model_with_prefix(tools, /*prefix_mcp_tool_names*/ true);
 
     assert_eq!(model_tools.len(), 1);
     let tool = model_tools.into_iter().next().expect("one tool");
     let model_name = tool.canonical_tool_name();
     assert_eq!(
         model_name,
-        ToolName::namespaced("mcp__server_one__", "tool_two_three")
+        ToolName::namespaced("mcp__server_one", "tool_two_three")
     );
     assert_eq!(
         ToolName::namespaced(tool.callable_namespace.clone(), tool.callable_name.clone()),
@@ -377,7 +383,7 @@ fn test_normalize_tools_sanitizes_invalid_characters() {
     // The callable parts are sanitized for model-visible tool calls, but the raw
     // MCP name is preserved for the actual MCP call.
     assert_eq!(tool.server_name, "server.one");
-    assert_eq!(tool.callable_namespace, "mcp__server_one__");
+    assert_eq!(tool.callable_namespace, "mcp__server_one");
     assert_eq!(tool.callable_name, "tool_two_three");
     assert_eq!(tool.tool.name, "tool.two-three");
 
@@ -391,15 +397,16 @@ fn test_normalize_tools_sanitizes_invalid_characters() {
 fn test_normalize_tools_keeps_hyphenated_mcp_tools_callable() {
     let tools = vec![create_test_tool("music-studio", "get-strudel-guide")];
 
-    let model_tools = normalize_tools_for_model(tools);
+    let model_tools =
+        normalize_tools_for_model_with_prefix(tools, /*prefix_mcp_tool_names*/ true);
 
     assert_eq!(model_tools.len(), 1);
     let tool = model_tools.into_iter().next().expect("one tool");
     assert_eq!(
         tool.canonical_tool_name(),
-        ToolName::namespaced("mcp__music_studio__", "get_strudel_guide")
+        ToolName::namespaced("mcp__music_studio", "get_strudel_guide")
     );
-    assert_eq!(tool.callable_namespace, "mcp__music_studio__");
+    assert_eq!(tool.callable_namespace, "mcp__music_studio");
     assert_eq!(tool.callable_name, "get_strudel_guide");
     assert_eq!(tool.tool.name, "get-strudel-guide");
 }
@@ -411,7 +418,8 @@ fn test_normalize_tools_disambiguates_sanitized_namespace_collisions() {
         create_test_tool("basic_server", "query"),
     ];
 
-    let model_tools = normalize_tools_for_model(tools);
+    let model_tools =
+        normalize_tools_for_model_with_prefix(tools, /*prefix_mcp_tool_names*/ true);
 
     assert_eq!(model_tools.len(), 2);
     let mut namespaces = model_tools
@@ -441,7 +449,8 @@ fn test_normalize_tools_disambiguates_sanitized_tool_name_collisions() {
         create_test_tool("server", "tool_name"),
     ];
 
-    let model_tools = normalize_tools_for_model(tools);
+    let model_tools =
+        normalize_tools_for_model_with_prefix(tools, /*prefix_mcp_tool_names*/ true);
 
     assert_eq!(model_tools.len(), 2);
     let raw_tool_names = model_tools
@@ -687,8 +696,11 @@ async fn list_all_tools_uses_startup_snapshot_while_client_is_pending() {
         .shared();
     let approval_policy = Constrained::allow_any(AskForApproval::OnFailure);
     let permission_profile = Constrained::allow_any(PermissionProfile::default());
-    let mut manager =
-        McpConnectionManager::new_uninitialized(&approval_policy, &permission_profile);
+    let mut manager = McpConnectionManager::new_uninitialized(
+        &approval_policy,
+        &permission_profile,
+        /*prefix_mcp_tool_names*/ true,
+    );
     manager.clients.insert(
         CODEX_APPS_MCP_SERVER_NAME.to_string(),
         AsyncManagedClient {
@@ -705,7 +717,7 @@ async fn list_all_tools_uses_startup_snapshot_while_client_is_pending() {
         .iter()
         .find(|tool| {
             tool.canonical_tool_name()
-                == ToolName::namespaced("mcp__codex_apps__", "calendar_create_event")
+                == ToolName::namespaced("mcp__codex_apps", "calendar_create_event")
         })
         .expect("tool from startup cache");
     assert_eq!(tool.server_name, CODEX_APPS_MCP_SERVER_NAME);
@@ -720,8 +732,11 @@ async fn resolve_tool_info_accepts_canonical_namespaced_tool_names() {
         .shared();
     let approval_policy = Constrained::allow_any(AskForApproval::OnFailure);
     let permission_profile = Constrained::allow_any(PermissionProfile::default());
-    let mut manager =
-        McpConnectionManager::new_uninitialized(&approval_policy, &permission_profile);
+    let mut manager = McpConnectionManager::new_uninitialized(
+        &approval_policy,
+        &permission_profile,
+        /*prefix_mcp_tool_names*/ false,
+    );
     manager.clients.insert(
         "rmcp".to_string(),
         AsyncManagedClient {
@@ -734,11 +749,52 @@ async fn resolve_tool_info_accepts_canonical_namespaced_tool_names() {
     );
 
     let tool = manager
-        .resolve_tool_info(&ToolName::namespaced("mcp__rmcp__", "echo"))
+        .resolve_tool_info(&ToolName::namespaced("rmcp", "echo"))
         .await
         .expect("split MCP tool namespace and name should resolve");
 
-    let expected = ("rmcp", "mcp__rmcp__", "echo", "echo");
+    let expected = ("rmcp", "rmcp", "echo", "echo");
+    assert_eq!(
+        (
+            tool.server_name.as_str(),
+            tool.callable_namespace.as_str(),
+            tool.callable_name.as_str(),
+            tool.tool.name.as_ref(),
+        ),
+        expected
+    );
+}
+
+#[tokio::test]
+async fn list_all_tools_applies_legacy_mcp_prefix_by_default() {
+    let startup_tools = vec![create_test_tool("rmcp", "echo")];
+    let pending_client = futures::future::pending::<Result<ManagedClient, StartupOutcomeError>>()
+        .boxed()
+        .shared();
+    let approval_policy = Constrained::allow_any(AskForApproval::OnFailure);
+    let permission_profile = Constrained::allow_any(PermissionProfile::default());
+    let mut manager = McpConnectionManager::new_uninitialized(
+        &approval_policy,
+        &permission_profile,
+        /*prefix_mcp_tool_names*/ true,
+    );
+    manager.clients.insert(
+        "rmcp".to_string(),
+        AsyncManagedClient {
+            client: pending_client,
+            startup_snapshot: Some(startup_tools),
+            startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
+            cancel_token: CancellationToken::new(),
+        },
+    );
+
+    let tool = manager
+        .resolve_tool_info(&ToolName::namespaced("mcp__rmcp", "echo"))
+        .await
+        .expect("legacy-prefixed MCP tool name should resolve");
+
+    let expected = ("rmcp", "mcp__rmcp", "echo", "echo");
     assert_eq!(
         (
             tool.server_name.as_str(),
@@ -757,8 +813,11 @@ async fn list_all_tools_blocks_while_client_is_pending_without_startup_snapshot(
         .shared();
     let approval_policy = Constrained::allow_any(AskForApproval::OnFailure);
     let permission_profile = Constrained::allow_any(PermissionProfile::default());
-    let mut manager =
-        McpConnectionManager::new_uninitialized(&approval_policy, &permission_profile);
+    let mut manager = McpConnectionManager::new_uninitialized(
+        &approval_policy,
+        &permission_profile,
+        /*prefix_mcp_tool_names*/ true,
+    );
     manager.clients.insert(
         CODEX_APPS_MCP_SERVER_NAME.to_string(),
         AsyncManagedClient {
@@ -782,8 +841,11 @@ async fn list_all_tools_does_not_block_when_startup_snapshot_cache_hit_is_empty(
         .shared();
     let approval_policy = Constrained::allow_any(AskForApproval::OnFailure);
     let permission_profile = Constrained::allow_any(PermissionProfile::default());
-    let mut manager =
-        McpConnectionManager::new_uninitialized(&approval_policy, &permission_profile);
+    let mut manager = McpConnectionManager::new_uninitialized(
+        &approval_policy,
+        &permission_profile,
+        /*prefix_mcp_tool_names*/ true,
+    );
     manager.clients.insert(
         CODEX_APPS_MCP_SERVER_NAME.to_string(),
         AsyncManagedClient {
@@ -816,8 +878,11 @@ async fn list_all_tools_uses_startup_snapshot_when_client_startup_fails() {
     .shared();
     let approval_policy = Constrained::allow_any(AskForApproval::OnFailure);
     let permission_profile = Constrained::allow_any(PermissionProfile::default());
-    let mut manager =
-        McpConnectionManager::new_uninitialized(&approval_policy, &permission_profile);
+    let mut manager = McpConnectionManager::new_uninitialized(
+        &approval_policy,
+        &permission_profile,
+        /*prefix_mcp_tool_names*/ true,
+    );
     let startup_complete = Arc::new(std::sync::atomic::AtomicBool::new(true));
     manager.clients.insert(
         CODEX_APPS_MCP_SERVER_NAME.to_string(),
@@ -835,7 +900,7 @@ async fn list_all_tools_uses_startup_snapshot_when_client_startup_fails() {
         .iter()
         .find(|tool| {
             tool.canonical_tool_name()
-                == ToolName::namespaced("mcp__codex_apps__", "calendar_create_event")
+                == ToolName::namespaced("mcp__codex_apps", "calendar_create_event")
         })
         .expect("tool from startup cache");
     assert_eq!(tool.server_name, CODEX_APPS_MCP_SERVER_NAME);

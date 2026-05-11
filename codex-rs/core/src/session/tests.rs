@@ -3842,6 +3842,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         mcp_connection_manager: Arc::new(RwLock::new(McpConnectionManager::new_uninitialized(
             &config.permissions.approval_policy,
             &config.permissions.permission_profile,
+            config.prefix_mcp_tool_names(),
         ))),
         mcp_startup_cancellation_token: Mutex::new(CancellationToken::new()),
         unified_exec_manager: UnifiedExecProcessManager::new(
@@ -5562,6 +5563,7 @@ where
         mcp_connection_manager: Arc::new(RwLock::new(McpConnectionManager::new_uninitialized(
             &config.permissions.approval_policy,
             &config.permissions.permission_profile,
+            config.prefix_mcp_tool_names(),
         ))),
         mcp_startup_cancellation_token: Mutex::new(CancellationToken::new()),
         unified_exec_manager: UnifiedExecProcessManager::new(
