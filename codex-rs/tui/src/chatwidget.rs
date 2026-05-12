@@ -88,6 +88,7 @@ use crate::version::CODEX_CLI_VERSION;
 use codex_app_server_protocol::AddCreditsNudgeCreditType;
 use codex_app_server_protocol::AddCreditsNudgeEmailStatus;
 use codex_app_server_protocol::AppInfo;
+use codex_app_server_protocol::AppListUpdatedNotification;
 use codex_app_server_protocol::AppSummary;
 use codex_app_server_protocol::CodexErrorInfo as AppServerCodexErrorInfo;
 use codex_app_server_protocol::CollabAgentTool;
@@ -124,13 +125,11 @@ use codex_app_server_protocol::TurnCompletedNotification;
 use codex_app_server_protocol::TurnPlanStepStatus;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput;
-use codex_chatgpt::connectors as chatgpt_connectors;
 use codex_config::ConfigLayerStackOrdering;
 use codex_config::types::ApprovalsReviewer;
 use codex_config::types::Notifications;
 use codex_config::types::WindowsSandboxModeToml;
 use codex_core_skills::model::SkillMetadata;
-use codex_exec_server::EnvironmentManager;
 use codex_features::FEATURES;
 use codex_features::Feature;
 #[cfg(test)]
@@ -574,7 +573,6 @@ pub(crate) fn get_limits_duration(windows_minutes: i64) -> String {
 /// Common initialization parameters shared by all `ChatWidget` constructors.
 pub(crate) struct ChatWidgetInit {
     pub(crate) config: Config,
-    pub(crate) environment_manager: Arc<EnvironmentManager>,
     pub(crate) frame_requester: FrameRequester,
     pub(crate) app_event_tx: AppEventSender,
     /// App-server-backed runner used by status surfaces for workspace metadata probes.
@@ -668,7 +666,6 @@ pub(crate) struct ChatWidget {
     bottom_pane: BottomPane,
     transcript: TranscriptState,
     config: Config,
-    environment_manager: Arc<EnvironmentManager>,
     raw_output_mode: bool,
     /// Runtime value resolved by core. `config.service_tier` remains the explicit user choice.
     effective_service_tier: Option<String>,
@@ -4762,7 +4759,6 @@ impl ChatWidget {
     fn new_with_op_target(common: ChatWidgetInit, codex_op_target: CodexOpTarget) -> Self {
         let ChatWidgetInit {
             config,
-            environment_manager,
             frame_requester,
             app_event_tx,
             workspace_command_runner,
@@ -4853,7 +4849,6 @@ impl ChatWidget {
             transcript: TranscriptState::new(active_cell),
             raw_output_mode: config.tui_raw_output_mode,
             config,
-            environment_manager,
             effective_service_tier,
             skills_all: Vec::new(),
             skills_initial_state: None,
@@ -6740,62 +6735,9 @@ impl ChatWidget {
             self.connectors.cache = ConnectorsCacheState::Loading;
         }
 
-        let config = self.config.clone();
-        let environment_manager = Arc::clone(&self.environment_manager);
-        let app_event_tx = self.app_event_tx.clone();
-        tokio::spawn(async move {
-            let accessible_result =
-                match chatgpt_connectors::list_accessible_connectors_from_mcp_tools_with_environment_manager(
-                    &config,
-                    force_refetch,
-                    &environment_manager,
-                )
-                .await
-                {
-                    Ok(connectors) => connectors,
-                    Err(err) => {
-                        app_event_tx.send(AppEvent::ConnectorsLoaded {
-                            result: Err(format!("Failed to load apps: {err}")),
-                            is_final: true,
-                        });
-                        return;
-                    }
-                };
-            let should_schedule_force_refetch =
-                !force_refetch && !accessible_result.codex_apps_ready;
-            let accessible_connectors = accessible_result.connectors;
-
-            app_event_tx.send(AppEvent::ConnectorsLoaded {
-                result: Ok(ConnectorsSnapshot {
-                    connectors: accessible_connectors.clone(),
-                }),
-                is_final: false,
-            });
-
-            let result: Result<ConnectorsSnapshot, String> = async {
-                let all_connectors =
-                    chatgpt_connectors::list_all_connectors_with_options(&config, force_refetch)
-                        .await?;
-                let connectors = chatgpt_connectors::merge_connectors_with_accessible(
-                    all_connectors,
-                    accessible_connectors,
-                    /*all_connectors_loaded*/ true,
-                );
-                Ok(ConnectorsSnapshot { connectors })
-            }
-            .await
-            .map_err(|err: anyhow::Error| format!("Failed to load apps: {err}"));
-
-            app_event_tx.send(AppEvent::ConnectorsLoaded {
-                result,
-                is_final: true,
-            });
-
-            if should_schedule_force_refetch {
-                app_event_tx.send(AppEvent::RefreshConnectors {
-                    force_refetch: true,
-                });
-            }
+        self.app_event_tx.send(AppEvent::FetchAppsList {
+            force_refetch,
+            thread_id: self.thread_id,
         });
     }
 
@@ -10134,6 +10076,7 @@ impl ChatWidget {
         is_final: bool,
     ) {
         let mut trigger_pending_force_refetch = false;
+        let preserve_enabled_state = self.connectors.force_refetch_pending;
         if is_final {
             self.connectors.prefetch_in_flight = false;
             if self.connectors.force_refetch_pending {
@@ -10144,16 +10087,9 @@ impl ChatWidget {
 
         match result {
             Ok(mut snapshot) => {
-                if !is_final {
-                    snapshot.connectors = chatgpt_connectors::merge_connectors_with_accessible(
-                        Vec::new(),
-                        snapshot.connectors,
-                        /*all_connectors_loaded*/ false,
-                    );
-                }
-                snapshot.connectors =
-                    chatgpt_connectors::with_app_enabled_state(snapshot.connectors, &self.config);
-                if let ConnectorsCacheState::Ready(existing_snapshot) = &self.connectors.cache {
+                if preserve_enabled_state
+                    && let ConnectorsCacheState::Ready(existing_snapshot) = &self.connectors.cache
+                {
                     let enabled_by_id: HashMap<&str, bool> = existing_snapshot
                         .connectors
                         .iter()
@@ -10199,6 +10135,19 @@ impl ChatWidget {
         }
     }
 
+    fn on_app_list_updated(&mut self, notification: AppListUpdatedNotification) {
+        if !notification.is_final && !self.connectors.prefetch_in_flight {
+            return;
+        }
+        let is_final = notification.is_final && !self.connectors.prefetch_in_flight;
+        self.on_connectors_loaded(
+            Ok(ConnectorsSnapshot {
+                connectors: notification.data,
+            }),
+            is_final,
+        );
+    }
+
     pub(crate) fn update_connector_enabled(&mut self, connector_id: &str, enabled: bool) {
         let ConnectorsCacheState::Ready(mut snapshot) = self.connectors.cache.clone() else {
             return;
@@ -10217,6 +10166,9 @@ impl ChatWidget {
             return;
         }
 
+        if self.connectors.prefetch_in_flight {
+            self.connectors.force_refetch_pending = true;
+        }
         self.refresh_connectors_popup_if_open(&snapshot.connectors);
         self.connectors.cache = ConnectorsCacheState::Ready(snapshot.clone());
         self.bottom_pane.set_connectors_snapshot(Some(snapshot));
