@@ -128,48 +128,139 @@ pub fn install_wfp_filters<F>(
     offline_username: &str,
     otel: Option<&StatsigMetricsSettings>,
     mut log: F,
-) where
+) -> Result<()>
+where
     F: FnMut(&str),
 {
-    let metric = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let (metric, install_result) = evaluate_wfp_install(offline_username, &mut log, || {
         install_wfp_filters_for_account(offline_username)
-    })) {
+    });
+
+    emit_wfp_setup_metric_safely(codex_home, otel, offline_username, &metric, &mut log);
+    install_result
+}
+
+fn evaluate_wfp_install<F, I>(
+    offline_username: &str,
+    log: &mut F,
+    install: I,
+) -> (WfpSetupMetric, Result<()>)
+where
+    F: FnMut(&str),
+    I: FnOnce() -> Result<usize>,
+{
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(install)) {
         Ok(Ok(installed_filter_count)) => {
             log(&format!(
                 "WFP setup succeeded for {offline_username} with {installed_filter_count} installed filters"
             ));
-            WfpSetupMetric {
-                outcome: WfpSetupMetricOutcome::Success,
-                target_account: offline_username.to_string(),
-                installed_filter_count,
-                error: None,
-            }
+            (
+                WfpSetupMetric {
+                    outcome: WfpSetupMetricOutcome::Success,
+                    target_account: offline_username.to_string(),
+                    installed_filter_count,
+                    error: None,
+                },
+                Ok(()),
+            )
         }
         Ok(Err(err)) => {
             let error = err.to_string();
-            log(&format!(
-                "WFP setup failed for {offline_username}: {error}; continuing elevated setup"
-            ));
-            WfpSetupMetric {
-                outcome: WfpSetupMetricOutcome::Failure,
-                target_account: offline_username.to_string(),
-                installed_filter_count: 0,
-                error: Some(error),
-            }
+            log(&format!("WFP setup failed for {offline_username}: {error}"));
+            (
+                WfpSetupMetric {
+                    outcome: WfpSetupMetricOutcome::Failure,
+                    target_account: offline_username.to_string(),
+                    installed_filter_count: 0,
+                    error: Some(error.clone()),
+                },
+                Err(anyhow::anyhow!(
+                    "WFP setup failed for {offline_username}: {error}"
+                )),
+            )
         }
         Err(panic_payload) => {
             let error = panic_payload_to_string(panic_payload);
             log(&format!(
-                "WFP setup panicked for {offline_username}: {error}; continuing elevated setup"
+                "WFP setup panicked for {offline_username}: {error}"
             ));
-            WfpSetupMetric {
-                outcome: WfpSetupMetricOutcome::Failure,
-                target_account: offline_username.to_string(),
-                installed_filter_count: 0,
-                error: Some(format!("panic: {error}")),
-            }
+            (
+                WfpSetupMetric {
+                    outcome: WfpSetupMetricOutcome::Failure,
+                    target_account: offline_username.to_string(),
+                    installed_filter_count: 0,
+                    error: Some(format!("panic: {error}")),
+                },
+                Err(anyhow::anyhow!(
+                    "WFP setup panicked for {offline_username}: {error}"
+                )),
+            )
         }
-    };
+    }
+}
 
-    emit_wfp_setup_metric_safely(codex_home, otel, offline_username, &metric, &mut log);
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn evaluate_wfp_install_returns_ok_after_success() {
+        let mut messages = Vec::new();
+        let mut log = |message: &str| messages.push(message.to_string());
+
+        let (metric, result) = evaluate_wfp_install("offline", &mut log, || Ok(3));
+
+        assert!(result.is_ok());
+        assert!(matches!(metric.outcome, WfpSetupMetricOutcome::Success));
+        assert_eq!(metric.installed_filter_count, 3);
+        assert_eq!(metric.error, None);
+        assert_eq!(
+            messages,
+            vec!["WFP setup succeeded for offline with 3 installed filters"]
+        );
+    }
+
+    #[test]
+    fn evaluate_wfp_install_returns_err_after_install_failure() {
+        let mut messages = Vec::new();
+        let mut log = |message: &str| messages.push(message.to_string());
+
+        let (metric, result) =
+            evaluate_wfp_install("offline", &mut log, || Err(anyhow::anyhow!("driver error")));
+
+        let error = result.expect_err("install failures must bubble out");
+        assert_eq!(
+            error.to_string(),
+            "WFP setup failed for offline: driver error"
+        );
+        assert!(matches!(metric.outcome, WfpSetupMetricOutcome::Failure));
+        assert_eq!(metric.installed_filter_count, 0);
+        assert_eq!(metric.error.as_deref(), Some("driver error"));
+        assert_eq!(messages, vec!["WFP setup failed for offline: driver error"]);
+    }
+
+    #[test]
+    fn evaluate_wfp_install_returns_err_after_install_panic() {
+        let mut messages = Vec::new();
+        let mut log = |message: &str| messages.push(message.to_string());
+
+        let (metric, result) =
+            evaluate_wfp_install("offline", &mut log, || panic!("unexpected installer panic"));
+
+        let error = result.expect_err("installer panics must bubble out");
+        assert_eq!(
+            error.to_string(),
+            "WFP setup panicked for offline: unexpected installer panic"
+        );
+        assert!(matches!(metric.outcome, WfpSetupMetricOutcome::Failure));
+        assert_eq!(metric.installed_filter_count, 0);
+        assert_eq!(
+            metric.error.as_deref(),
+            Some("panic: unexpected installer panic")
+        );
+        assert_eq!(
+            messages,
+            vec!["WFP setup panicked for offline: unexpected installer panic"]
+        );
+    }
 }
