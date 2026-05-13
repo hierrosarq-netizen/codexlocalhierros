@@ -42,6 +42,8 @@ pub(crate) struct PostToolUseOutput {
     pub invalid_block_reason: Option<String>,
     pub additional_context: Option<String>,
     pub invalid_reason: Option<String>,
+    pub updated_tool_output: Option<serde_json::Value>,
+    pub updated_mcp_tool_output: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -188,11 +190,7 @@ pub(crate) fn parse_permission_request(stdout: &str) -> Option<PermissionRequest
 pub(crate) fn parse_post_tool_use(stdout: &str) -> Option<PostToolUseOutput> {
     let wire: PostToolUseCommandOutputWire = parse_json(stdout)?;
     let universal = UniversalOutput::from(wire.universal);
-    let invalid_reason = unsupported_post_tool_use_universal(&universal).or_else(|| {
-        wire.hook_specific_output
-            .as_ref()
-            .and_then(unsupported_post_tool_use_hook_specific_output)
-    });
+    let invalid_reason = unsupported_post_tool_use_universal(&universal);
     let should_block = matches!(wire.decision, Some(BlockDecisionWire::Block));
     let invalid_block_reason = if should_block
         && match wire.reason.as_deref() {
@@ -205,9 +203,16 @@ pub(crate) fn parse_post_tool_use(stdout: &str) -> Option<PostToolUseOutput> {
     } else {
         None
     };
-    let additional_context = wire
+    let (additional_context, updated_tool_output, updated_mcp_tool_output) = wire
         .hook_specific_output
-        .and_then(|output| output.additional_context);
+        .map(|output| {
+            (
+                output.additional_context,
+                output.updated_tool_output,
+                output.updated_mcp_tool_output,
+            )
+        })
+        .unwrap_or_default();
 
     Some(PostToolUseOutput {
         universal,
@@ -216,6 +221,8 @@ pub(crate) fn parse_post_tool_use(stdout: &str) -> Option<PostToolUseOutput> {
         invalid_block_reason,
         additional_context,
         invalid_reason,
+        updated_tool_output,
+        updated_mcp_tool_output,
     })
 }
 
@@ -375,16 +382,6 @@ fn permission_request_decision(
                 .and_then(trimmed_reason)
                 .unwrap_or_else(|| "PermissionRequest hook denied approval".to_string()),
         },
-    }
-}
-
-fn unsupported_post_tool_use_hook_specific_output(
-    output: &crate::schema::PostToolUseHookSpecificOutputWire,
-) -> Option<String> {
-    if output.updated_mcp_tool_output.is_some() {
-        Some("PostToolUse hook returned unsupported updatedMCPToolOutput".to_string())
-    } else {
-        None
     }
 }
 
