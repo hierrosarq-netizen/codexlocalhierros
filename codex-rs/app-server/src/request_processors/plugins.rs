@@ -550,15 +550,9 @@ impl PluginRequestProcessor {
             remote_sources.push(RemoteMarketplaceSource::SharedWithMe);
         }
         if !remote_sources.is_empty() {
-            let remote_plugin_service_config = RemotePluginServiceConfig {
-                chatgpt_base_url: config.chatgpt_base_url.clone(),
-            };
-            match codex_core_plugins::remote::fetch_remote_marketplaces(
-                &remote_plugin_service_config,
-                auth.as_ref(),
-                &remote_sources,
-            )
-            .await
+            match plugins_manager
+                .fetch_remote_plugin_with_caching(&plugins_input, auth.as_ref(), &remote_sources)
+                .await
             {
                 Ok(remote_marketplaces) => {
                     for remote_marketplace in remote_marketplaces
@@ -1212,13 +1206,13 @@ impl PluginRequestProcessor {
         .await
         .map_err(|err| remote_plugin_catalog_error_to_jsonrpc(err, "install remote plugin"))?;
 
-        self.thread_manager
-            .plugins_manager()
-            .maybe_start_remote_installed_plugins_cache_refresh_after_mutation(
-                &config.plugins_config_input(),
-                auth.clone(),
-                Some(self.effective_plugins_changed_callback()),
-            );
+        let plugins_manager = self.thread_manager.plugins_manager();
+        plugins_manager.clear_remote_marketplaces_cache();
+        plugins_manager.maybe_start_remote_installed_plugins_cache_refresh_after_mutation(
+            &config.plugins_config_input(),
+            auth.clone(),
+            Some(self.effective_plugins_changed_callback()),
+        );
 
         let mut plugin_metadata =
             plugin_telemetry_metadata_from_root(&result.plugin_id, &result.installed_path).await;
@@ -1508,6 +1502,7 @@ impl PluginRequestProcessor {
             Ok(()) | Err(RemotePluginCatalogError::CacheRemove(_))
         ) {
             let plugins_manager = self.thread_manager.plugins_manager();
+            plugins_manager.clear_remote_marketplaces_cache();
             if plugins_manager.clear_remote_installed_plugins_cache() {
                 self.on_effective_plugins_changed();
             }
