@@ -378,6 +378,39 @@ fn profile_allows_configured_network_proxy(permission_profile: &PermissionProfil
     }
 }
 
+fn build_network_proxy_spec(
+    configured_network_proxy_config: NetworkProxyConfig,
+    network_requirements: Option<Sourced<codex_config::NetworkConstraints>>,
+    permission_profile: &PermissionProfile,
+) -> std::io::Result<Option<NetworkProxySpec>> {
+    let (network_requirements, network_requirements_source) = match network_requirements {
+        Some(Sourced { value, source }) => (Some(value), Some(source)),
+        None => (None, None),
+    };
+    let has_network_requirements = network_requirements.is_some();
+    let network = NetworkProxySpec::from_config_and_constraints(
+        configured_network_proxy_config,
+        network_requirements,
+        permission_profile,
+    )
+    .map_err(|err| {
+        if let Some(source) = network_requirements_source.as_ref() {
+            std::io::Error::new(
+                err.kind(),
+                format!("failed to build managed network proxy from {source}: {err}"),
+            )
+        } else {
+            err
+        }
+    })?;
+
+    Ok(if has_network_requirements {
+        Some(network)
+    } else {
+        network.enabled().then_some(network)
+    })
+}
+
 /// Configured thread persistence backend.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ThreadStoreConfig {
@@ -424,6 +457,13 @@ pub struct Config {
 
     /// Effective permission configuration for shell tool execution.
     pub permissions: Permissions,
+
+    /// Whether config explicitly selected named permissions profiles instead
+    /// of the legacy `sandbox_mode` syntax.
+    pub explicit_permission_profile_mode: bool,
+
+    /// User-defined permission profile IDs available from effective config.
+    pub custom_permission_profile_ids: Vec<String>,
 
     /// Configures who approval requests are routed to for review once they have
     /// been escalated. This does not disable separate safety checks such as
@@ -2332,6 +2372,17 @@ impl Config {
                 Some(PermissionConfigSyntax::Profiles)
             )
             || permission_config_syntax.is_none();
+        let explicit_permission_profile_mode = default_permissions_override.is_some()
+            || matches!(
+                permission_config_syntax,
+                Some(PermissionConfigSyntax::Profiles)
+            );
+        let custom_permission_profile_ids = cfg
+            .permissions
+            .as_ref()
+            .map_or_else(Vec::new, |permissions| {
+                permissions.entries.keys().cloned().collect()
+            });
         let using_implicit_builtin_profile =
             permission_config_syntax.is_none() && default_permissions.is_none();
         let (
@@ -2963,32 +3014,12 @@ impl Config {
         let mcp_servers = constrain_mcp_servers(cfg.mcp_servers.clone(), mcp_servers.as_ref())
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{e}")))?;
 
-        let (network_requirements, network_requirements_source) = match network_requirements {
-            Some(Sourced { value, source }) => (Some(value), Some(source)),
-            None => (None, None),
-        };
-        let has_network_requirements = network_requirements.is_some();
         let network_permission_profile = constrained_permission_profile.get().clone();
-        let network = NetworkProxySpec::from_config_and_constraints(
+        let network = build_network_proxy_spec(
             configured_network_proxy_config,
             network_requirements,
             &network_permission_profile,
-        )
-        .map_err(|err| {
-            if let Some(source) = network_requirements_source.as_ref() {
-                std::io::Error::new(
-                    err.kind(),
-                    format!("failed to build managed network proxy from {source}: {err}"),
-                )
-            } else {
-                err
-            }
-        })?;
-        let network = if has_network_requirements {
-            Some(network)
-        } else {
-            network.enabled().then_some(network)
-        };
+        )?;
         let helper_readable_roots = get_readable_roots_required_for_codex_runtime(
             &codex_home,
             zsh_path.as_ref(),
@@ -3043,6 +3074,8 @@ impl Config {
                 windows_sandbox_mode,
                 windows_sandbox_private_desktop,
             },
+            explicit_permission_profile_mode,
+            custom_permission_profile_ids,
             approvals_reviewer: constrained_approvals_reviewer.value(),
             enforce_residency: enforce_residency.value,
             notify: cfg.notify,
@@ -3330,6 +3363,41 @@ impl Config {
             .requirements_toml()
             .network
             .is_some()
+    }
+
+    pub(crate) fn network_proxy_spec_for_active_permission_profile(
+        &self,
+        active_permission_profile: &ActivePermissionProfile,
+        permission_profile: &PermissionProfile,
+    ) -> std::io::Result<Option<NetworkProxySpec>> {
+        let profile_allows_network_proxy =
+            profile_allows_configured_network_proxy(permission_profile);
+        let configured_network_proxy_config = if profile_allows_network_proxy {
+            let cfg: ConfigToml = self
+                .config_layer_stack
+                .effective_config()
+                .try_into()
+                .map_err(|err| {
+                    std::io::Error::new(
+                        ErrorKind::InvalidInput,
+                        format!(
+                            "failed to read effective config for selected permission profile: {err}"
+                        ),
+                    )
+                })?;
+            network_proxy_config_for_profile_selection(
+                cfg.permissions.as_ref(),
+                active_permission_profile.id.as_str(),
+            )?
+        } else {
+            NetworkProxyConfig::default()
+        };
+
+        build_network_proxy_spec(
+            configured_network_proxy_config,
+            self.config_layer_stack.requirements().network.clone(),
+            permission_profile,
+        )
     }
 
     pub fn bundled_skills_enabled(&self) -> bool {

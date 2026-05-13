@@ -249,6 +249,7 @@ async fn memories_startup_phase1_uses_live_thread_service_tier() -> anyhow::Resu
             approvals_reviewer: None,
             sandbox_policy: None,
             permission_profile: None,
+            active_permission_profile: None,
             windows_sandbox_level: None,
             model: None,
             effort: None,
@@ -372,8 +373,13 @@ async fn wait_for_single_request(mock: &ResponseMock) -> ResponsesRequest {
 async fn wait_for_file_removed(path: &Path) -> anyhow::Result<()> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if !tokio::fs::try_exists(path).await? {
-            return Ok(());
+        match tokio::fs::try_exists(path).await {
+            Ok(false) => return Ok(()),
+            Ok(true) => {}
+            Err(err)
+                if cfg!(target_os = "windows")
+                    && err.kind() == std::io::ErrorKind::PermissionDenied => {}
+            Err(err) => return Err(err.into()),
         }
         assert!(
             Instant::now() < deadline,
