@@ -2270,6 +2270,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
             CoreUserInput::Mention {
                 name: "Demo App".to_string(),
                 path: "app://demo-app".to_string(),
+                computer_use_native_app_bundle_id: None,
             },
         ],
     });
@@ -2296,6 +2297,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
                 UserInput::Mention {
                     name: "Demo App".to_string(),
                     path: "app://demo-app".to_string(),
+                    computer_use_native_app_bundle_id: None,
                 },
             ],
         }

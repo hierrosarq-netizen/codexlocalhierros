@@ -255,6 +255,8 @@ pub enum UserInput {
     Mention {
         name: String,
         path: String,
+        #[serde(default)]
+        computer_use_native_app_bundle_id: Option<String>,
     },
 }
 
@@ -271,7 +273,15 @@ impl UserInput {
             UserInput::Image { url } => CoreUserInput::Image { image_url: url },
             UserInput::LocalImage { path } => CoreUserInput::LocalImage { path },
             UserInput::Skill { name, path } => CoreUserInput::Skill { name, path },
-            UserInput::Mention { name, path } => CoreUserInput::Mention { name, path },
+            UserInput::Mention {
+                name,
+                path,
+                computer_use_native_app_bundle_id,
+            } => CoreUserInput::Mention {
+                name,
+                path,
+                computer_use_native_app_bundle_id,
+            },
         }
     }
 }
@@ -289,7 +299,15 @@ impl From<CoreUserInput> for UserInput {
             CoreUserInput::Image { image_url } => UserInput::Image { url: image_url },
             CoreUserInput::LocalImage { path } => UserInput::LocalImage { path },
             CoreUserInput::Skill { name, path } => UserInput::Skill { name, path },
-            CoreUserInput::Mention { name, path } => UserInput::Mention { name, path },
+            CoreUserInput::Mention {
+                name,
+                path,
+                computer_use_native_app_bundle_id,
+            } => UserInput::Mention {
+                name,
+                path,
+                computer_use_native_app_bundle_id,
+            },
             _ => unreachable!("unsupported user input variant"),
         }
     }
