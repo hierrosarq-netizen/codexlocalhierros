@@ -165,15 +165,23 @@ async fn resolve_rollout_path(
     thread_id: codex_protocol::ThreadId,
     include_archived: bool,
 ) -> ThreadStoreResult<Option<std::path::PathBuf>> {
-    if let Ok(path) = live_writer::rollout_path(store, thread_id).await
-        && tokio::fs::try_exists(path.as_path()).await.map_err(|err| {
+    if let Ok(path) = live_writer::rollout_path(store, thread_id).await {
+        let live_rollout_exists = tokio::fs::try_exists(path.as_path()).await.map_err(|err| {
             ThreadStoreError::InvalidRequest {
                 message: format!("failed to check rollout path for thread id {thread_id}: {err}"),
             }
-        })?
-        && (include_archived || !rollout_path_is_archived(store.config.codex_home.as_path(), &path))
-    {
-        return Ok(Some(path));
+        })?;
+        if live_rollout_exists
+            && (include_archived
+                || !rollout_path_is_archived(store.config.codex_home.as_path(), &path))
+        {
+            return Ok(Some(path));
+        }
+        if live_rollout_exists {
+            return Err(ThreadStoreError::InvalidRequest {
+                message: format!("thread {thread_id} is archived"),
+            });
+        }
     }
 
     let state_db_ctx = store.state_db().await;
@@ -572,6 +580,62 @@ mod tests {
         assert!(thread.archived_at.is_some());
         assert_eq!(thread.preview, "Archived user message");
         assert!(thread.history.is_none());
+    }
+
+    #[tokio::test]
+    async fn read_thread_rejects_archived_rollout_from_stale_active_sqlite_path() {
+        let home = TempDir::new().expect("temp dir");
+        let store = LocalThreadStore::new(test_config(home.path()));
+        let uuid = Uuid::from_u128(408);
+        let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
+        let archived_path = write_archived_session_file(home.path(), "2025-01-03T12-30-00", uuid)
+            .expect("archived session file");
+
+        let runtime =
+            codex_state::StateRuntime::init(home.path().to_path_buf(), "test-provider".to_string())
+                .await
+                .expect("initialize runtime");
+        let mut builder = ThreadMetadataBuilder::new(
+            thread_id,
+            archived_path.clone(),
+            Utc::now(),
+            SessionSource::Cli,
+        );
+        builder.cwd = home.path().to_path_buf();
+        builder.cli_version = Some("test_version".to_string());
+        builder.model_provider = Some("test-provider".to_string());
+        runtime
+            .upsert_thread(&builder.build("test-provider"))
+            .await
+            .expect("upsert stale active metadata");
+        runtime
+            .mark_backfill_complete(Some("archived_sessions/stale-active-path"))
+            .await
+            .expect("mark backfill complete");
+
+        let err = store
+            .read_thread(ReadThreadParams {
+                thread_id,
+                include_archived: false,
+                include_history: false,
+            })
+            .await
+            .expect_err("active-only read should reject archived rollout from stale db path");
+
+        assert!(matches!(err, ThreadStoreError::InvalidRequest { .. }));
+        assert!(err.to_string().contains("archived"));
+
+        let thread = store
+            .read_thread(ReadThreadParams {
+                thread_id,
+                include_archived: true,
+                include_history: false,
+            })
+            .await
+            .expect("read archived thread");
+
+        assert_eq!(thread.rollout_path, Some(archived_path));
+        assert!(thread.archived_at.is_some());
     }
 
     #[tokio::test]
