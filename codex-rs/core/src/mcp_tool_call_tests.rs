@@ -2188,6 +2188,7 @@ enabled = true
     let parsed: ConfigToml = toml::from_str(&contents).expect("parse config");
     let tool = parsed
         .plugins
+        .entries
         .get("sample@test")
         .and_then(|plugin| plugin.mcp_servers.get("sample"))
         .and_then(|server| server.tools.get("search"))

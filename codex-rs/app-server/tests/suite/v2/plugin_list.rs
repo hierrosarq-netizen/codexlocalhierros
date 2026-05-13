@@ -1956,7 +1956,7 @@ async fn plugin_list_fetches_shared_with_me_kind() -> Result<()> {
 }
 
 #[tokio::test]
-async fn plugin_list_omits_shared_with_me_kind_when_plugin_sharing_disabled() -> Result<()> {
+async fn plugin_list_omits_shared_with_me_kind_when_plugin_sharing_not_allowed() -> Result<()> {
     let codex_home = TempDir::new()?;
     let server = MockServer::start().await;
     std::fs::write(
@@ -1966,7 +1966,9 @@ async fn plugin_list_omits_shared_with_me_kind_when_plugin_sharing_disabled() ->
 
 [features]
 plugins = true
-plugin_sharing = false
+
+[plugins]
+allow_sharing = false
 "#,
             server.uri()
         ),
