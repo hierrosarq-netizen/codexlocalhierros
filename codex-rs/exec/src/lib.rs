@@ -267,6 +267,9 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         bypass_hook_trust,
         cwd,
         add_dir,
+        worktree: _,
+        worktree_base: _,
+        worktree_dirty: _,
     } = shared;
 
     let (_stdout_with_ansi, stderr_with_ansi) = match color {
