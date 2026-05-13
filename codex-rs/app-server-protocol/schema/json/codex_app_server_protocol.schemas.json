@@ -14076,6 +14076,12 @@
               "id": {
                 "type": "string"
               },
+              "output_hint": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "result": {
                 "type": "string"
               },

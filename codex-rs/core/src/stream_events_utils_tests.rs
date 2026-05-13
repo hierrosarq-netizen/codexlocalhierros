@@ -201,6 +201,7 @@ fn completed_item_defers_mailbox_delivery_for_image_generation_calls() {
         status: "completed".to_string(),
         revised_prompt: None,
         result: "Zm9v".to_string(),
+        output_hint: None,
     };
 
     assert!(completed_item_defers_mailbox_delivery_to_next_turn(
