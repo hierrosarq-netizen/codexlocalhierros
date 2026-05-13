@@ -225,6 +225,9 @@ pub enum Feature {
     /// Enable experimental realtime voice conversation mode in the TUI.
     RealtimeConversation,
     /// Connect app-server to the ChatGPT remote control service.
+    ///
+    /// Runtime/requirements-only gate: this should not be overridden from
+    /// config.toml.
     RemoteControl,
     /// Removed compatibility flag retained as a no-op so old wrappers can
     /// still pass `--enable image_detail_original`.
@@ -259,6 +262,12 @@ impl Feature {
 
     pub fn default_enabled(self) -> bool {
         self.info().default_enabled
+    }
+
+    /// Whether `[features]` entries in config.toml are allowed to override this
+    /// feature's effective state.
+    pub fn can_override_from_config_toml(self) -> bool {
+        !matches!(self, Feature::RemoteControl)
     }
 
     fn info(self) -> &'static FeatureSpec {
@@ -633,6 +642,8 @@ impl FeaturesToml {
                 materialize_resolved_feature_enabled(apps_mcp_path_override, enabled);
             } else if spec.id == Feature::NetworkProxy {
                 materialize_resolved_feature_enabled(network_proxy, enabled);
+            } else if !spec.id.can_override_from_config_toml() {
+                entries.remove(spec.key);
             } else {
                 entries.insert(spec.key.to_string(), enabled);
             }
