@@ -16,6 +16,7 @@ use codex_login::CodexAuth;
 use codex_login::collect_auth_env_telemetry;
 use codex_login::default_client::build_reqwest_client;
 use codex_model_provider_info::ModelProviderInfo;
+use codex_models_manager::client_version_to_whole;
 use codex_models_manager::manager::ModelsEndpointClient;
 use codex_otel::TelemetryAuthMode;
 use codex_protocol::error::CodexErr;
@@ -36,6 +37,7 @@ const MODELS_ENDPOINT: &str = "/models";
 pub(crate) struct OpenAiModelsEndpoint {
     provider_info: ModelProviderInfo,
     auth_manager: Option<Arc<AuthManager>>,
+    auth_override: Option<CodexAuth>,
 }
 
 impl OpenAiModelsEndpoint {
@@ -46,10 +48,23 @@ impl OpenAiModelsEndpoint {
         Self {
             provider_info,
             auth_manager,
+            auth_override: None,
+        }
+    }
+
+    fn with_auth(provider_info: ModelProviderInfo, auth: CodexAuth) -> Self {
+        Self {
+            provider_info,
+            auth_manager: None,
+            auth_override: Some(auth),
         }
     }
 
     async fn auth(&self) -> Option<CodexAuth> {
+        if let Some(auth) = self.auth_override.as_ref() {
+            return Some(auth.clone());
+        }
+
         match self.auth_manager.as_ref() {
             Some(auth_manager) => auth_manager.auth().await,
             None => None,
@@ -63,6 +78,15 @@ impl OpenAiModelsEndpoint {
             .is_some_and(|auth_manager| auth_manager.codex_api_key_env_enabled());
         collect_auth_env_telemetry(&self.provider_info, codex_api_key_env_enabled)
     }
+}
+
+pub async fn validate_api_key_with_models_endpoint(
+    provider_info: ModelProviderInfo,
+    api_key: &str,
+) -> CoreResult<()> {
+    OpenAiModelsEndpoint::with_auth(provider_info, CodexAuth::from_api_key(api_key))
+        .validate_access(&client_version_to_whole())
+        .await
 }
 
 #[async_trait]
@@ -84,6 +108,34 @@ impl ModelsEndpointClient for OpenAiModelsEndpoint {
     ) -> CoreResult<(Vec<ModelInfo>, Option<String>)> {
         let _timer =
             codex_otel::start_global_timer("codex.remote_models.fetch_update.duration_ms", &[]);
+        let client = self.models_client().await?;
+
+        timeout(
+            MODELS_REFRESH_TIMEOUT,
+            client.list_models(client_version, HeaderMap::new()),
+        )
+        .await
+        .map_err(|_| CodexErr::Timeout)?
+        .map_err(map_api_error)
+    }
+}
+
+impl OpenAiModelsEndpoint {
+    async fn validate_access(&self, client_version: &str) -> CoreResult<()> {
+        let _timer =
+            codex_otel::start_global_timer("codex.remote_models.fetch_update.duration_ms", &[]);
+        let client = self.models_client().await?;
+
+        timeout(
+            MODELS_REFRESH_TIMEOUT,
+            client.validate_access(client_version, HeaderMap::new()),
+        )
+        .await
+        .map_err(|_| CodexErr::Timeout)?
+        .map_err(map_api_error)
+    }
+
+    async fn models_client(&self) -> CoreResult<ModelsClient<ReqwestTransport>> {
         let auth = self.auth().await;
         let auth_mode = auth.as_ref().map(CodexAuth::auth_mode);
         let api_provider = self.provider_info.to_api_provider(auth_mode)?;
@@ -96,16 +148,9 @@ impl ModelsEndpointClient for OpenAiModelsEndpoint {
             auth_header_name: auth_telemetry.name,
             auth_env: self.auth_env(),
         });
-        let client = ModelsClient::new(transport, api_provider, api_auth)
-            .with_telemetry(Some(request_telemetry));
 
-        timeout(
-            MODELS_REFRESH_TIMEOUT,
-            client.list_models(client_version, HeaderMap::new()),
-        )
-        .await
-        .map_err(|_| CodexErr::Timeout)?
-        .map_err(map_api_error)
+        Ok(ModelsClient::new(transport, api_provider, api_auth)
+            .with_telemetry(Some(request_telemetry)))
     }
 }
 

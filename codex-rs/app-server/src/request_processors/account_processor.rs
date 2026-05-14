@@ -47,6 +47,10 @@ enum RefreshTokenRequestOutcome {
     FailedPermanently,
 }
 
+fn api_key_validation_unavailable() -> JSONRPCErrorError {
+    invalid_request("Could not validate API key right now. Check your connection and try again.")
+}
+
 impl Drop for ActiveLogin {
     fn drop(&mut self) {
         self.cancel();
@@ -273,6 +277,8 @@ impl AccountRequestProcessor {
             }
         }
 
+        self.validate_api_key(&params.api_key).await?;
+
         match login_with_api_key(
             &self.config.codex_home,
             &params.api_key,
@@ -284,6 +290,32 @@ impl AccountRequestProcessor {
             }
             Err(err) => Err(internal_error(format!("failed to save api key: {err}"))),
         }
+    }
+
+    async fn validate_api_key(&self, api_key: &str) -> Result<(), JSONRPCErrorError> {
+        if !self.config.model_provider.requires_openai_auth {
+            return Ok(());
+        }
+
+        validate_api_key_with_models_endpoint(self.config.model_provider.clone(), api_key)
+            .await
+            .map_err(|err| match err {
+                CodexErr::UnexpectedStatus(err) if matches!(err.status.as_u16(), 401 | 403) => {
+                    invalid_request("API key is invalid or unusable.")
+                }
+                CodexErr::UnexpectedStatus(err)
+                    if err.status.is_server_error() || matches!(err.status.as_u16(), 408 | 429) =>
+                {
+                    api_key_validation_unavailable()
+                }
+                CodexErr::Timeout
+                | CodexErr::Stream(..)
+                | CodexErr::ResponseStreamFailed(_)
+                | CodexErr::ConnectionFailed(_)
+                | CodexErr::InternalServerError
+                | CodexErr::RetryLimit(_) => api_key_validation_unavailable(),
+                err => internal_error(format!("failed to validate api key: {err}")),
+            })
     }
 
     async fn login_api_key_v2(&self, request_id: ConnectionRequestId, params: LoginApiKeyParams) {
