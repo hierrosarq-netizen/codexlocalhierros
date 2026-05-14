@@ -29,6 +29,7 @@ use codex_protocol::protocol::HookHandlerType;
 use codex_protocol::protocol::HookRunSummary;
 use codex_protocol::protocol::HookSource;
 use codex_protocol::protocol::HookTrustStatus;
+use codex_protocol::protocol::HookVisibilityHint;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use std::collections::HashMap;
 
@@ -45,6 +46,7 @@ pub(crate) struct ConfiguredHandler {
     pub command: String,
     pub timeout_sec: u64,
     pub status_message: Option<String>,
+    pub visibility_hint: HookVisibilityHint,
     pub source_path: AbsolutePathBuf,
     pub source: HookSource,
     pub display_order: i64,

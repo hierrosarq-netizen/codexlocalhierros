@@ -2546,6 +2546,7 @@ async fn user_prompt_submit_app_server_hook_notifications_render_snapshot() {
                 display_order: 0,
                 status: AppServerHookRunStatus::Running,
                 status_message: Some("checking go-workflow input policy".to_string()),
+                visibility_hint: Default::default(),
                 started_at: 1,
                 completed_at: None,
                 duration_ms: None,
@@ -2569,6 +2570,7 @@ async fn user_prompt_submit_app_server_hook_notifications_render_snapshot() {
                 display_order: 0,
                 status: AppServerHookRunStatus::Stopped,
                 status_message: Some("checking go-workflow input policy".to_string()),
+                visibility_hint: Default::default(),
                 started_at: 1,
                 completed_at: Some(11),
                 duration_ms: Some(10),
@@ -2774,6 +2776,134 @@ async fn completed_hook_with_output_flushes_immediately() {
     assert_chatwidget_snapshot!(
         "completed_hook_with_output_flushes_immediately_snapshot",
         format!("{running_snapshot}\n\n{completed_snapshot}")
+    );
+}
+
+#[tokio::test]
+async fn visibility_hidden_hooks_skip_routine_rows_but_render_failures_snapshot() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    let mut routine_started = hook_started_run(
+        "post-tool-use:0:/tmp/hooks.json",
+        codex_app_server_protocol::HookEventName::PostToolUse,
+        Some("checking output policy"),
+    );
+    routine_started.visibility_hint = codex_app_server_protocol::HookVisibilityHint::Hidden;
+    handle_hook_started(&mut chat, routine_started);
+    reveal_running_hooks(&mut chat);
+    let routine_running_snapshot = hook_live_and_history_snapshot(&chat, "routine running", "");
+
+    let mut routine_completed = hook_completed_run(
+        "post-tool-use:0:/tmp/hooks.json",
+        codex_app_server_protocol::HookEventName::PostToolUse,
+        codex_app_server_protocol::HookRunStatus::Completed,
+        Vec::new(),
+    );
+    routine_completed.visibility_hint = codex_app_server_protocol::HookVisibilityHint::Hidden;
+    handle_hook_completed(&mut chat, routine_completed);
+    let routine_history = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<String>();
+    let routine_completed_snapshot =
+        hook_live_and_history_snapshot(&chat, "routine completed", &routine_history);
+
+    let mut warning_completed = hook_completed_run(
+        "post-tool-use:1:/tmp/hooks.json",
+        codex_app_server_protocol::HookEventName::PostToolUse,
+        codex_app_server_protocol::HookRunStatus::Completed,
+        vec![
+            codex_app_server_protocol::HookOutputEntry {
+                kind: codex_app_server_protocol::HookOutputEntryKind::Context,
+                text: "background context for the model".to_string(),
+            },
+            codex_app_server_protocol::HookOutputEntry {
+                kind: codex_app_server_protocol::HookOutputEntryKind::Warning,
+                text: "review this managed hook warning".to_string(),
+            },
+        ],
+    );
+    warning_completed.visibility_hint = codex_app_server_protocol::HookVisibilityHint::Hidden;
+    handle_hook_completed(&mut chat, warning_completed);
+    let warning_history = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<String>();
+    let warning_snapshot =
+        hook_live_and_history_snapshot(&chat, "warning with hidden context", &warning_history);
+
+    let mut failed_completed = hook_completed_run(
+        "post-tool-use:2:/tmp/hooks.json",
+        codex_app_server_protocol::HookEventName::PostToolUse,
+        codex_app_server_protocol::HookRunStatus::Failed,
+        vec![codex_app_server_protocol::HookOutputEntry {
+            kind: codex_app_server_protocol::HookOutputEntryKind::Error,
+            text: "hook exited with code 7".to_string(),
+        }],
+    );
+    failed_completed.visibility_hint = codex_app_server_protocol::HookVisibilityHint::Hidden;
+    handle_hook_completed(&mut chat, failed_completed);
+    let failed_history = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<String>();
+    let failed_snapshot = hook_live_and_history_snapshot(&chat, "failed", &failed_history);
+
+    assert_chatwidget_snapshot!(
+        "visibility_hidden_hooks_skip_routine_rows_but_render_failures_snapshot",
+        format!(
+            "{routine_running_snapshot}\n\n{routine_completed_snapshot}\n\n{warning_snapshot}\n\n{failed_snapshot}"
+        )
+    );
+}
+
+#[tokio::test]
+async fn visibility_hidden_hook_completion_flushes_prior_assistant_text_snapshot() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    handle_agent_message_delta(&mut chat, "I found the relevant policy.\n");
+
+    let mut hidden_started = hook_started_run(
+        "post-tool-use:3:/tmp/hooks.json",
+        codex_app_server_protocol::HookEventName::PostToolUse,
+        Some("checking output policy"),
+    );
+    hidden_started.visibility_hint = codex_app_server_protocol::HookVisibilityHint::Hidden;
+    handle_hook_started(&mut chat, hidden_started);
+
+    let mut hidden_warning = hook_completed_run(
+        "post-tool-use:3:/tmp/hooks.json",
+        codex_app_server_protocol::HookEventName::PostToolUse,
+        codex_app_server_protocol::HookRunStatus::Completed,
+        vec![codex_app_server_protocol::HookOutputEntry {
+            kind: codex_app_server_protocol::HookOutputEntryKind::Warning,
+            text: "review this managed hook warning".to_string(),
+        }],
+    );
+    hidden_warning.visibility_hint = codex_app_server_protocol::HookVisibilityHint::Hidden;
+    handle_hook_completed(&mut chat, hidden_warning);
+
+    let history = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<String>();
+    assert_chatwidget_snapshot!(
+        "visibility_hidden_hook_completion_flushes_prior_assistant_text_snapshot",
+        format!(
+            "active hooks:\n{}history:\n{history}",
+            active_hook_blob(&chat)
+        )
+    );
+
+    let assistant_index = history
+        .find("I found the relevant policy.")
+        .expect("assistant text should be flushed into history");
+    let hook_index = history
+        .find("PostToolUse hook (completed)")
+        .expect("visible hidden-hook completion should be in history");
+    assert!(
+        assistant_index < hook_index,
+        "assistant text should precede later hidden-hook output: {history:?}"
     );
 }
 
@@ -3166,6 +3296,7 @@ fn hook_run_summary(
         display_order: 0,
         status,
         status_message: status_message.map(str::to_string),
+        visibility_hint: Default::default(),
         started_at: 1,
         completed_at: (status != codex_app_server_protocol::HookRunStatus::Running).then_some(2),
         duration_ms: (status != codex_app_server_protocol::HookRunStatus::Running).then_some(1),

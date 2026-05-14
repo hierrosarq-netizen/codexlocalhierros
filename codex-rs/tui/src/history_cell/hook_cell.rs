@@ -9,7 +9,7 @@
 //! 2. Runs that outlive the reveal delay become visible and may be coalesced with adjacent runs.
 //! 3. Visible quiet successes linger briefly so they do not disappear in the same frame they were
 //!    first drawn.
-//! 4. Completed runs only persist when they have output or a non-success status.
+//! 4. Completed runs only persist when they have displayable output or a non-success status.
 use super::HistoryCell;
 use super::plain_lines;
 use crate::motion::MotionMode;
@@ -22,6 +22,7 @@ use codex_app_server_protocol::HookOutputEntry;
 use codex_app_server_protocol::HookOutputEntryKind;
 use codex_app_server_protocol::HookRunStatus;
 use codex_app_server_protocol::HookRunSummary;
+use codex_app_server_protocol::HookVisibilityHint;
 use ratatui::prelude::*;
 use ratatui::style::Stylize;
 use ratatui::widgets::Paragraph;
@@ -96,6 +97,12 @@ enum HookRunState {
 struct RunningHookGroupKey {
     event_name: HookEventName,
     status_message: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum HookPresentation {
+    Skip,
+    Render { entries: Vec<HookOutputEntry> },
 }
 
 /// Accumulator for adjacent running hooks that can share one status line.
@@ -216,20 +223,21 @@ impl HookCell {
         let Some(index) = self.runs.iter().position(|existing| existing.id == run.id) else {
             return false;
         };
-        if hook_run_is_quiet_success(&run) {
-            if !self.runs[index]
-                .state
-                .complete_quiet_success(Instant::now())
+        let presentation = hook_presentation(&run);
+        let HookPresentation::Render { entries } = presentation else {
+            if run.status == HookRunStatus::Completed
+                && !self.runs[index]
+                    .state
+                    .complete_quiet_success(Instant::now())
             {
                 self.runs.remove(index);
             }
             return true;
-        }
+        };
         let HookRunSummary {
             event_name,
             status_message,
             status,
-            entries,
             ..
         } = run;
         let existing = &mut self.runs[index];
@@ -243,15 +251,14 @@ impl HookCell {
     ///
     /// This is used for replay/restoration paths where the final run summary is already known.
     pub(crate) fn add_completed_run(&mut self, run: HookRunSummary) {
-        if hook_run_is_quiet_success(&run) {
+        let HookPresentation::Render { entries } = hook_presentation(&run) else {
             return;
-        }
+        };
         let HookRunSummary {
             id,
             event_name,
             status_message,
             status,
-            entries,
             ..
         } = run;
         self.runs.push(HookRunCell {
@@ -679,9 +686,55 @@ pub(crate) fn new_completed_hook_cell(run: HookRunSummary, animations_enabled: b
     HookCell::new_completed(run, animations_enabled)
 }
 
-/// Returns true for hook completions that should be invisible in history.
-fn hook_run_is_quiet_success(run: &HookRunSummary) -> bool {
-    run.status == HookRunStatus::Completed && run.entries.is_empty()
+/// Returns true when a hook marked as hidden has no user-relevant consequence to render.
+pub(crate) fn hook_run_should_skip_render(run: &HookRunSummary) -> bool {
+    run.visibility_hint == HookVisibilityHint::Hidden
+        && matches!(hook_presentation(run), HookPresentation::Skip)
+}
+
+/// Chooses the transcript presentation for a hook run:
+///
+/// - Normal hooks render exactly as reported.
+/// - Hooks that complete without entries stay quiet, preserving the pre-existing "quiet success"
+///   behavior.
+/// - Hidden hooks stay silent while running.
+/// - Hidden hooks that complete with only model-only context stay out of the transcript.
+/// - Hidden hooks that complete with context plus user-facing output keep only the user-facing
+///   entries.
+/// - Hidden hooks that block, fail, or stop always render so the transcript still explains
+///   consequential hook behavior.
+fn hook_presentation(run: &HookRunSummary) -> HookPresentation {
+    if run.status == HookRunStatus::Completed && run.entries.is_empty() {
+        return HookPresentation::Skip;
+    }
+
+    if run.visibility_hint != HookVisibilityHint::Hidden {
+        return HookPresentation::Render {
+            entries: run.entries.clone(),
+        };
+    }
+
+    match run.status {
+        HookRunStatus::Running => HookPresentation::Skip,
+        HookRunStatus::Blocked | HookRunStatus::Failed | HookRunStatus::Stopped => {
+            HookPresentation::Render {
+                entries: run.entries.clone(),
+            }
+        }
+        HookRunStatus::Completed => {
+            let entries = run
+                .entries
+                .iter()
+                .filter(|entry| entry.kind != HookOutputEntryKind::Context)
+                .cloned()
+                .collect::<Vec<_>>();
+            if entries.is_empty() {
+                HookPresentation::Skip
+            } else {
+                HookPresentation::Render { entries }
+            }
+        }
+    }
 }
 
 fn hook_completed_bullet(status: HookRunStatus, entries: &[HookOutputEntry]) -> Span<'static> {
@@ -802,6 +855,67 @@ mod tests {
         );
     }
 
+    #[test]
+    fn hidden_hook_skips_routine_running_and_empty_completion_rows() {
+        let mut run = hook_run_summary("hook-1");
+        run.visibility_hint = HookVisibilityHint::Hidden;
+        assert!(hook_run_should_skip_render(&run));
+
+        run.status = HookRunStatus::Completed;
+        assert!(hook_run_should_skip_render(&run));
+
+        run.entries = vec![HookOutputEntry {
+            kind: HookOutputEntryKind::Context,
+            text: "Context only".to_string(),
+        }];
+        assert!(hook_run_should_skip_render(&run));
+    }
+
+    #[test]
+    fn default_hook_keeps_empty_completion_quiet() {
+        let mut run = hook_run_summary("hook-1");
+        run.status = HookRunStatus::Completed;
+
+        assert!(!hook_run_should_skip_render(&run));
+        assert_eq!(hook_presentation(&run), HookPresentation::Skip);
+    }
+
+    #[test]
+    fn hidden_hook_still_surfaces_user_relevant_outcomes() {
+        let mut run = hook_run_summary("hook-1");
+        run.visibility_hint = HookVisibilityHint::Hidden;
+        run.status = HookRunStatus::Failed;
+        assert!(!hook_run_should_skip_render(&run));
+
+        run.status = HookRunStatus::Blocked;
+        assert!(!hook_run_should_skip_render(&run));
+
+        run.status = HookRunStatus::Stopped;
+        assert!(!hook_run_should_skip_render(&run));
+
+        run.status = HookRunStatus::Completed;
+        run.entries = vec![
+            HookOutputEntry {
+                kind: HookOutputEntryKind::Context,
+                text: "Model-only context".to_string(),
+            },
+            HookOutputEntry {
+                kind: HookOutputEntryKind::Warning,
+                text: "Review this hook result".to_string(),
+            },
+        ];
+        assert!(!hook_run_should_skip_render(&run));
+        assert_eq!(
+            hook_presentation(&run),
+            HookPresentation::Render {
+                entries: vec![HookOutputEntry {
+                    kind: HookOutputEntryKind::Warning,
+                    text: "Review this hook result".to_string(),
+                }],
+            }
+        );
+    }
+
     fn hook_run_summary(id: &str) -> HookRunSummary {
         HookRunSummary {
             id: id.to_string(),
@@ -814,6 +928,7 @@ mod tests {
             display_order: 0,
             status: HookRunStatus::Running,
             status_message: Some("checking output policy".to_string()),
+            visibility_hint: HookVisibilityHint::Default,
             started_at: 1,
             completed_at: None,
             duration_ms: None,

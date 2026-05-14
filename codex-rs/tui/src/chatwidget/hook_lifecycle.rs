@@ -7,6 +7,9 @@ use super::*;
 
 impl ChatWidget {
     pub(super) fn on_hook_started(&mut self, run: codex_app_server_protocol::HookRunSummary) {
+        if history_cell::hook_run_should_skip_render(&run) {
+            return;
+        }
         self.flush_answer_stream_with_separator();
         self.flush_completed_hook_output();
         match self.active_hook_cell.as_mut() {
@@ -29,6 +32,9 @@ impl ChatWidget {
         &mut self,
         completed: codex_app_server_protocol::HookRunSummary,
     ) {
+        if history_cell::hook_run_should_skip_render(&completed) {
+            return;
+        }
         let completed_existing_run = self
             .active_hook_cell
             .as_mut()
@@ -37,6 +43,7 @@ impl ChatWidget {
         if completed_existing_run {
             self.bump_active_cell_revision();
         } else {
+            self.flush_answer_stream_with_separator();
             match self.active_hook_cell.as_mut() {
                 Some(cell) => {
                     cell.add_completed_run(completed);
