@@ -369,6 +369,7 @@ use self::notifications::Notification;
 mod permission_popups;
 mod protocol;
 mod protocol_requests;
+mod queued_sends;
 mod rate_limits;
 use self::rate_limits::RateLimitErrorKind;
 use self::rate_limits::RateLimitSwitchPromptState;
