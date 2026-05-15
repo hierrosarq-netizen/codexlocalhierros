@@ -2815,8 +2815,6 @@ pub struct TurnContextNetworkItem {
 pub struct TurnContextItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trace_id: Option<String>,
     pub cwd: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_date: Option<String>,
@@ -2840,14 +2838,6 @@ pub struct TurnContextItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<ReasoningEffortConfig>,
     pub summary: ReasoningSummaryConfig,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub user_instructions: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub developer_instructions: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub final_output_json_schema: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub truncation_policy: Option<TruncationPolicy>,
 }
 
 impl TurnContextItem {
@@ -5178,7 +5168,6 @@ mod tests {
             "summary": "auto",
         }))?;
 
-        assert_eq!(item.trace_id, None);
         assert_eq!(item.network, None);
         assert_eq!(item.file_system_sandbox_policy, None);
         Ok(())
@@ -5188,7 +5177,6 @@ mod tests {
     fn turn_context_item_serializes_network_when_present() -> Result<()> {
         let item = TurnContextItem {
             turn_id: None,
-            trace_id: None,
             cwd: test_path_buf("/tmp"),
             current_date: None,
             timezone: None,
@@ -5213,10 +5201,6 @@ mod tests {
             realtime_active: None,
             effort: None,
             summary: ReasoningSummaryConfig::Auto,
-            user_instructions: None,
-            developer_instructions: None,
-            final_output_json_schema: None,
-            truncation_policy: None,
         };
 
         let value = serde_json::to_value(item)?;
