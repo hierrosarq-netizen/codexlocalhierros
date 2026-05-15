@@ -33,7 +33,6 @@ pub use read_mcp_resource::ReadMcpResourceHandler;
 
 #[derive(Debug, Deserialize, Default)]
 struct ListResourcesArgs {
-    /// Lists all resources from all servers if not specified.
     #[serde(default)]
     server: Option<String>,
     #[serde(default)]
@@ -42,7 +41,6 @@ struct ListResourcesArgs {
 
 #[derive(Debug, Deserialize, Default)]
 struct ListResourceTemplatesArgs {
-    /// Lists all resource templates from all servers if not specified.
     #[serde(default)]
     server: Option<String>,
     #[serde(default)]

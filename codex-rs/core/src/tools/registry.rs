@@ -332,7 +332,6 @@ impl ToolRegistry {
                 ),
             ),
         ];
-
         {
             let mut active = invocation.session.active_turn.lock().await;
             if let Some(active_turn) = active.as_mut() {

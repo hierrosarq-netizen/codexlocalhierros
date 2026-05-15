@@ -4300,6 +4300,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
                 config.permissions.permission_profile(),
             ),
         )),
+        mcp_connection_manager_init_lock: Mutex::new(()),
         mcp_startup_cancellation_token: Mutex::new(CancellationToken::new()),
         unified_exec_manager: UnifiedExecProcessManager::new(
             config.background_terminal_max_timeout,
@@ -4408,7 +4409,8 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         state: Mutex::new(state),
         managed_network_proxy_refresh_lock: Semaphore::new(/*permits*/ 1),
         features: config.features.clone(),
-        pending_mcp_server_refresh_config: Mutex::new(None),
+        pending_mcp_server_refresh: Mutex::new(None),
+        mcp_connection_manager_initialized: std::sync::atomic::AtomicBool::new(false),
         conversation: Arc::new(RealtimeConversationManager::new()),
         active_turn: Mutex::new(None),
         mailbox,
@@ -6156,6 +6158,7 @@ where
                 config.permissions.permission_profile(),
             ),
         )),
+        mcp_connection_manager_init_lock: Mutex::new(()),
         mcp_startup_cancellation_token: Mutex::new(CancellationToken::new()),
         unified_exec_manager: UnifiedExecProcessManager::new(
             config.background_terminal_max_timeout,
@@ -6264,7 +6267,8 @@ where
         state: Mutex::new(state),
         managed_network_proxy_refresh_lock: Semaphore::new(/*permits*/ 1),
         features: config.features.clone(),
-        pending_mcp_server_refresh_config: Mutex::new(None),
+        pending_mcp_server_refresh: Mutex::new(None),
+        mcp_connection_manager_initialized: std::sync::atomic::AtomicBool::new(false),
         conversation: Arc::new(RealtimeConversationManager::new()),
         active_turn: Mutex::new(None),
         mailbox,
@@ -6363,33 +6367,39 @@ async fn refresh_mcp_servers_is_deferred_until_next_turn() {
         mcp_oauth_credentials_store_mode,
     };
     {
-        let mut guard = session.pending_mcp_server_refresh_config.lock().await;
+        let mut guard = session.pending_mcp_server_refresh.lock().await;
         *guard = Some(refresh_config);
     }
 
     assert!(!old_token.is_cancelled());
-    assert!(
-        session
-            .pending_mcp_server_refresh_config
-            .lock()
-            .await
-            .is_some()
-    );
+    assert!(session.pending_mcp_server_refresh.lock().await.is_some());
 
     session
         .refresh_mcp_servers_if_requested(&turn_context, /*elicitation_reviewer*/ None)
         .await;
 
     assert!(old_token.is_cancelled());
-    assert!(
-        session
-            .pending_mcp_server_refresh_config
-            .lock()
-            .await
-            .is_none()
-    );
+    assert!(session.pending_mcp_server_refresh.lock().await.is_none());
     let new_token = session.mcp_startup_cancellation_token().await;
     assert!(!new_token.is_cancelled());
+}
+
+#[tokio::test]
+async fn lazy_mcp_initialization_is_idempotent() {
+    let (session, _turn_context) = make_session_and_context().await;
+
+    session.ensure_mcp_connection_manager_initialized().await;
+    let first_token = session.mcp_startup_cancellation_token().await;
+    assert!(!first_token.is_cancelled());
+
+    session.ensure_mcp_connection_manager_initialized().await;
+
+    assert!(
+        !first_token.is_cancelled(),
+        "reinitializing the session-owned MCP pool should not cancel the first token",
+    );
+    let second_token = session.mcp_startup_cancellation_token().await;
+    assert!(!second_token.is_cancelled());
 }
 
 #[tokio::test]
