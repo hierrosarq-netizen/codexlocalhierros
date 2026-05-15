@@ -24,6 +24,7 @@ use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::FileSystemSandboxKind;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
+use codex_shell_command::is_dangerous_command::command_can_execute_arbitrary_command;
 use codex_shell_command::is_dangerous_command::command_might_be_dangerous;
 use codex_shell_command::is_safe_command::is_known_safe_command;
 use thiserror::Error;
@@ -309,10 +310,14 @@ impl ExecPolicyManager {
         let match_options = MatchOptions {
             resolve_host_executables: true,
         };
-        let evaluation = exec_policy.check_multiple_with_options(
-            commands.iter(),
+        let evaluation = apply_arbitrary_command_guard(
+            exec_policy.check_multiple_with_options(
+                commands.iter(),
+                &exec_policy_fallback,
+                &match_options,
+            ),
+            &commands,
             &exec_policy_fallback,
-            &match_options,
         );
 
         let requested_amendment = if auto_amendment_allowed {
@@ -472,6 +477,78 @@ impl ExecPolicyManager {
         updated_policy.add_network_rule(&host, protocol, decision, justification)?;
         self.policy.store(Arc::new(updated_policy));
         Ok(())
+    }
+}
+
+fn arbitrary_command_execution_is_explicitly_allowed(
+    command: &[String],
+    matched_rules: &[RuleMatch],
+) -> bool {
+    matched_rules.iter().any(|rule_match| {
+        let RuleMatch::PrefixRuleMatch {
+            matched_prefix,
+            decision: Decision::Allow,
+            ..
+        } = rule_match
+        else {
+            return false;
+        };
+
+        command.starts_with(matched_prefix) && command_can_execute_arbitrary_command(matched_prefix)
+    })
+}
+
+fn apply_arbitrary_command_guard<F>(
+    evaluation: Evaluation,
+    commands: &[Vec<String>],
+    exec_policy_fallback: &F,
+) -> Evaluation
+where
+    F: Fn(&[String]) -> Decision,
+{
+    if evaluation.decision != Decision::Allow {
+        return evaluation;
+    }
+
+    let arbitrary_command_matches = commands
+        .iter()
+        .filter_map(|command| {
+            if !command_can_execute_arbitrary_command(command)
+                || arbitrary_command_execution_is_explicitly_allowed(
+                    command,
+                    &evaluation.matched_rules,
+                )
+            {
+                return None;
+            }
+
+            let decision = exec_policy_fallback(command);
+            (decision != Decision::Allow).then(|| RuleMatch::HeuristicsRuleMatch {
+                command: command.clone(),
+                decision,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    if arbitrary_command_matches.is_empty() {
+        return evaluation;
+    }
+
+    let decision = if arbitrary_command_matches
+        .iter()
+        .any(|rule_match| rule_match.decision() == Decision::Forbidden)
+    {
+        Decision::Forbidden
+    } else {
+        Decision::Prompt
+    };
+    let Evaluation {
+        mut matched_rules, ..
+    } = evaluation;
+    matched_rules.extend(arbitrary_command_matches);
+    Evaluation {
+        decision,
+        matched_rules,
     }
 }
 

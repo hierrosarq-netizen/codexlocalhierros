@@ -152,10 +152,10 @@ fn parse_plain_command_from_node(cmd: tree_sitter::Node, src: &str) -> Option<Ve
                 if word_node.kind() != "word" {
                     return None;
                 }
-                words.push(word_node.utf8_text(src.as_bytes()).ok()?.to_owned());
+                words.push(parse_word_or_number(word_node, src)?);
             }
             "word" | "number" => {
-                words.push(child.utf8_text(src.as_bytes()).ok()?.to_owned());
+                words.push(parse_word_or_number(child, src)?);
             }
             "string" => {
                 let parsed = parse_double_quoted_string(child, src)?;
@@ -172,8 +172,7 @@ fn parse_plain_command_from_node(cmd: tree_sitter::Node, src: &str) -> Option<Ve
                 for part in child.named_children(&mut concat_cursor) {
                     match part.kind() {
                         "word" | "number" => {
-                            concatenated
-                                .push_str(part.utf8_text(src.as_bytes()).ok()?.to_owned().as_str());
+                            concatenated.push_str(&parse_word_or_number(part, src)?);
                         }
                         "string" => {
                             let parsed = parse_double_quoted_string(part, src)?;
@@ -213,13 +212,13 @@ fn parse_heredoc_command_words(cmd: Node<'_>, src: &str) -> Option<Vec<String>> 
                 {
                     return None;
                 }
-                words.push(word_node.utf8_text(src.as_bytes()).ok()?.to_owned());
+                words.push(parse_word_or_number(word_node, src)?);
             }
             "word" | "number" => {
                 if !is_literal_word_or_number(child) {
                     return None;
                 }
-                words.push(child.utf8_text(src.as_bytes()).ok()?.to_owned());
+                words.push(parse_word_or_number(child, src)?);
             }
             // Allow heredoc constructs that attach stdin to a single command
             // without changing argv matching semantics for the executable
@@ -251,6 +250,34 @@ fn is_allowed_heredoc_attachment_kind(kind: &str) -> bool {
             | "herestring_redirect"
             | "redirected_statement"
     )
+}
+
+fn parse_word_or_number(node: Node<'_>, src: &str) -> Option<String> {
+    if !matches!(node.kind(), "word" | "number") {
+        return None;
+    }
+
+    let raw = node.utf8_text(src.as_bytes()).ok()?;
+    unescape_unquoted_word(raw)
+}
+
+fn unescape_unquoted_word(raw: &str) -> Option<String> {
+    let mut unescaped = String::with_capacity(raw.len());
+    let mut chars = raw.chars();
+
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            unescaped.push(ch);
+            continue;
+        }
+
+        match chars.next() {
+            Some(escaped) => unescaped.push(escaped),
+            None => return None,
+        }
+    }
+
+    Some(unescaped)
 }
 
 fn find_single_command_node(root: Node<'_>) -> Option<Node<'_>> {
@@ -357,6 +384,26 @@ mod tests {
         assert_eq!(
             cmds2,
             vec![vec!["echo".to_string(), "hi there".to_string()]]
+        );
+    }
+
+    #[test]
+    fn unescapes_backslashes_in_unquoted_words() {
+        assert_eq!(
+            parse_seq(r"rg --pre\=./pre.sh pattern").unwrap(),
+            vec![vec![
+                "rg".to_string(),
+                "--pre=./pre.sh".to_string(),
+                "pattern".to_string(),
+            ]]
+        );
+        assert_eq!(
+            parse_seq(r"rg --\pre=./pre.sh pattern").unwrap(),
+            vec![vec![
+                "rg".to_string(),
+                "--pre=./pre.sh".to_string(),
+                "pattern".to_string(),
+            ]]
         );
     }
 

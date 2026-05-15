@@ -4,6 +4,7 @@ use crate::command_safety::is_dangerous_command::executable_name_lookup_key;
 // may appear before it (e.g., `-C`, `-c`, `--git-dir`).
 // Implemented in `is_dangerous_command` and shared here.
 use crate::command_safety::is_dangerous_command::find_git_subcommand;
+use crate::command_safety::ripgrep::is_safe_ripgrep_command;
 use crate::command_safety::windows_safe_commands::is_safe_command_windows;
 #[cfg(windows)]
 use crate::command_safety::windows_safe_commands::is_safe_powershell_words as is_safe_powershell_words_windows;
@@ -127,27 +128,7 @@ fn is_safe_to_call_with_exec(command: &[String]) -> bool {
         }
 
         // Ripgrep
-        Some("rg") => {
-            const UNSAFE_RIPGREP_OPTIONS_WITH_ARGS: &[&str] = &[
-                // Takes an arbitrary command that is executed for each match.
-                "--pre",
-                // Takes a command that can be used to obtain the local hostname.
-                "--hostname-bin",
-            ];
-            const UNSAFE_RIPGREP_OPTIONS_WITHOUT_ARGS: &[&str] = &[
-                // Calls out to other decompression tools, so do not auto-approve
-                // out of an abundance of caution.
-                "--search-zip",
-                "-z",
-            ];
-
-            !command.iter().any(|arg| {
-                UNSAFE_RIPGREP_OPTIONS_WITHOUT_ARGS.contains(&arg.as_str())
-                    || UNSAFE_RIPGREP_OPTIONS_WITH_ARGS
-                        .iter()
-                        .any(|&opt| arg == opt || arg.starts_with(&format!("{opt}=")))
-            })
-        }
+        Some("rg") => is_safe_ripgrep_command(command),
 
         // Git
         Some("git") => is_safe_git_command(command),
@@ -606,6 +587,21 @@ mod tests {
             assert!(
                 !is_safe_to_call_with_exec(&args),
                 "expected {args:?} to be considered unsafe due to external-command flag",
+            );
+        }
+    }
+
+    #[test]
+    fn bash_lc_escaped_ripgrep_options_are_unsafe() {
+        for script in [
+            r"rg --pre\=./pre.sh files",
+            r"rg --\pre=./pre.sh files",
+            r"rg --hostname\-bin=hostname files",
+            r"rg -\z files",
+        ] {
+            assert!(
+                !is_known_safe_command(&vec_str(&["bash", "-lc", script])),
+                "expected {script:?} to require approval after shell unescaping",
             );
         }
     }

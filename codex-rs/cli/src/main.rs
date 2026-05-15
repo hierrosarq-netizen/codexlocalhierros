@@ -843,6 +843,7 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
     let root_remote_auth_token_env = remote.remote_auth_token_env;
     let root_strict_config = interactive.strict_config;
     reject_root_strict_config_for_subcommand(root_strict_config, &subcommand)?;
+    reject_root_approval_policy_for_exec(interactive.approval_policy, &subcommand)?;
     if let Some(subcommand) = subcommand.as_ref() {
         profile_v2_for_subcommand(&interactive, subcommand)?;
     }
@@ -868,10 +869,7 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
                 root_remote_auth_token_env.as_deref(),
                 "exec",
             )?;
-            exec_cli
-                .shared
-                .inherit_exec_root_options(&interactive.shared);
-            exec_cli.strict_config |= root_strict_config;
+            apply_exec_root_options(&mut exec_cli, &interactive);
             prepend_config_flags(
                 &mut exec_cli.config_overrides,
                 root_config_overrides.clone(),
@@ -1741,6 +1739,25 @@ fn prepend_config_flags(
     subcommand_config_overrides.prepend_root_overrides(cli_config_overrides);
 }
 
+fn apply_exec_root_options(exec_cli: &mut ExecCli, interactive: &TuiCli) {
+    exec_cli
+        .shared
+        .inherit_exec_root_options(&interactive.shared);
+    exec_cli.strict_config |= interactive.strict_config;
+}
+
+fn reject_root_approval_policy_for_exec(
+    approval_policy: Option<codex_utils_cli::ApprovalModeCliArg>,
+    subcommand: &Option<Subcommand>,
+) -> anyhow::Result<()> {
+    if approval_policy.is_some() && matches!(subcommand, Some(Subcommand::Exec(_))) {
+        anyhow::bail!(
+            "`--ask-for-approval` is only supported for interactive TUI commands, not `codex exec`"
+        );
+    }
+    Ok(())
+}
+
 fn reject_remote_mode_for_subcommand(
     remote: Option<&str>,
     remote_auth_token_env: Option<&str>,
@@ -2295,6 +2312,40 @@ mod tests {
         .expect_err("conflicting permission flags should be rejected");
 
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn exec_rejects_approval_policy_after_subcommand() {
+        let err = MultitoolCli::try_parse_from(["codex", "exec", "-a", "untrusted", "hi"])
+            .expect_err("exec should not accept approval prompts");
+
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn exec_rejects_root_approval_policy() {
+        let cli = MultitoolCli::try_parse_from(["codex", "-a", "untrusted", "exec", "hi"])
+            .expect("parse should succeed");
+        let MultitoolCli {
+            interactive,
+            subcommand,
+            ..
+        } = cli;
+        let Some(Subcommand::Exec(mut exec)) = subcommand else {
+            panic!("expected exec subcommand");
+        };
+
+        apply_exec_root_options(&mut exec, &interactive);
+        let err = reject_root_approval_policy_for_exec(
+            interactive.approval_policy,
+            &Some(Subcommand::Exec(exec)),
+        )
+        .expect_err("root approval prompts should be rejected for exec");
+
+        assert_eq!(
+            err.to_string(),
+            "`--ask-for-approval` is only supported for interactive TUI commands, not `codex exec`"
+        );
     }
 
     fn app_server_from_args(args: &[&str]) -> AppServerCommand {

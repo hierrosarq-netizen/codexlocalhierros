@@ -230,6 +230,25 @@ fn exec_stderr_env_filter() -> EnvFilter {
         .unwrap_or_else(|_| EnvFilter::new("error"))
 }
 
+fn cli_overrides_include_approval_policy<T>(cli_kv_overrides: &[(String, T)]) -> bool {
+    cli_kv_overrides
+        .iter()
+        .any(|(key, _)| key == "approval_policy")
+}
+
+fn exec_approval_policy_override<T>(
+    dangerously_bypass_approvals_and_sandbox: bool,
+    cli_kv_overrides: &[(String, T)],
+) -> Option<AskForApproval> {
+    if dangerously_bypass_approvals_and_sandbox {
+        Some(AskForApproval::Never)
+    } else if cli_overrides_include_approval_policy(cli_kv_overrides) {
+        None
+    } else {
+        Some(AskForApproval::Never)
+    }
+}
+
 pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
     #[allow(clippy::print_stderr)]
     if let Some(message) = cli.removed_full_auto_warning() {
@@ -410,8 +429,12 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         model,
         review_model: None,
         config_profile,
-        // Default to never ask for approvals in headless mode. Feature flags can override.
-        approval_policy: Some(AskForApproval::Never),
+        // Default to never ask for approvals in headless mode unless a config
+        // override explicitly selected an approval policy.
+        approval_policy: exec_approval_policy_override(
+            dangerously_bypass_approvals_and_sandbox,
+            &cli_kv_overrides,
+        ),
         approvals_reviewer: None,
         sandbox_mode,
         permission_profile: None,
